@@ -8409,6 +8409,9 @@ void *throbber(void *arg)
 	sdata_t *sdata = ckp->sdata;
 	int counter = 0;
 
+	if (ckp->quiet)
+		goto out;
+
 	rename_proc("throbber");
 
 	while (42) {
@@ -8437,7 +8440,7 @@ void *throbber(void *arg)
 		}
 		fflush(stdout);
 	}
-
+out:
 	return NULL;
 }
 
