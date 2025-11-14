@@ -8120,25 +8120,25 @@ static void *statsupdate(void *arg)
 		notice_msg_entries(&char_list);
 
 		ghs1 = (stats->dsps1 * ckp->mindiff) * nonces;
-		suffix_string(ghs1, suffix1, 16, 0);
+		suffix_string(ghs1, suffix1, 16, 6);
 
 		ghs5 = (stats->dsps5 * ckp->mindiff) * nonces;
-		suffix_string(ghs5, suffix5, 16, 0);
+		suffix_string(ghs5, suffix5, 16, 6);
 
 		ghs15 = (stats->dsps15 * ckp->mindiff) * nonces;
-		suffix_string(ghs15, suffix15, 16, 0);
+		suffix_string(ghs15, suffix15, 16, 6);
 
 		ghs60 = (stats->dsps60 * ckp->mindiff) * nonces;
-		suffix_string(ghs60, suffix60, 16, 0);
+		suffix_string(ghs60, suffix60, 16, 6);
 
 		ghs360 = (stats->dsps360 * ckp->mindiff) * nonces;
-		suffix_string(ghs360, suffix360, 16, 0);
+		suffix_string(ghs360, suffix360, 16, 6);
 
 		ghs1440 = (stats->dsps1440 * ckp->mindiff) * nonces;
-		suffix_string(ghs1440, suffix1440, 16, 0);
+		suffix_string(ghs1440, suffix1440, 16, 6);
 
 		ghs10080 = (stats->dsps10080 * ckp->mindiff) * nonces;
-		suffix_string(ghs10080, suffix10080, 16, 0);
+		suffix_string(ghs10080, suffix10080, 16, 6);
 
 		ASPRINTF(&fname, "%s/pool/pool.status", ckp->logdir);
 		fp = fopen(fname, "we");
