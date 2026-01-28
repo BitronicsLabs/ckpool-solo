@@ -4945,6 +4945,7 @@ static json_t *parse_subscribe(stratum_instance_t *client, const int64_t client_
 			}
 			if (!ua_ret) {
 				stratum_send_message(ckp_sdata, client, "Only allowed user agents may subscribe");
+				connector_drop_client(ckp, client_id);
 				return json_string("Only allowed user agents may subscribe");
 			}
 		}
