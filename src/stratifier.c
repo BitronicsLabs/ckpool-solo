@@ -4205,12 +4205,12 @@ static json_t *clientinfo(const stratum_instance_t *client)
 	json_set_string(val, "enonce1", client->enonce1);
 	json_set_string(val, "enonce1var", client->enonce1var);
 	json_set_int(val, "enonce1_64", client->enonce1_64);
-	json_set_double(val, "diff", client->diff);
-	json_set_double(val, "dsps1", client->dsps1);
-	json_set_double(val, "dsps5", client->dsps5);
-	json_set_double(val, "dsps60", client->dsps60);
-	json_set_double(val, "dsps1440", client->dsps1440);
-	json_set_double(val, "dsps10080", client->dsps10080);
+	json_set_double(val, "diff", isfinite(client->diff) ? client->diff : 0.0);
+	json_set_double(val, "dsps1", isfinite(client->dsps1) ? client->dsps1 : 0.0);
+	json_set_double(val, "dsps5", isfinite(client->dsps5) ? client->dsps5 : 0.0);
+	json_set_double(val, "dsps60", isfinite(client->dsps60) ? client->dsps60 : 0.0);
+	json_set_double(val, "dsps1440", isfinite(client->dsps1440) ? client->dsps1440 : 0.0);
+	json_set_double(val, "dsps10080", isfinite(client->dsps10080) ? client->dsps10080 : 0.0);
 	json_set_int(val, "lastshare", client->last_share.tv_sec);
 	json_set_int(val, "starttime", client->start_time);
 	json_set_string(val, "address", client->address);
@@ -4221,7 +4221,7 @@ static json_t *clientinfo(const stratum_instance_t *client)
 	json_set_string(val, "workername", client->workername ? client->workername : "");
 	json_set_int(val, "userid", client->user_id);
 	json_set_int(val, "server", client->server);
-	json_set_double(val, "bestdiff", client->best_diff);
+	json_set_double(val, "bestdiff", isfinite(client->best_diff) ? client->best_diff : 0.0);
 	json_set_int(val, "proxyid", client->proxyid);
 	json_set_int(val, "subproxyid", client->subproxyid);
 
@@ -4483,15 +4483,26 @@ static void get_poolstats(sdata_t *sdata, int *sockd)
 	json_t *val;
 
 	mutex_lock(&sdata->stats_lock);
-	JSON_CPACK(val, "{si,si,si,si,si,sI,sf,sf,sf,sf,sI,sI,sf,sf,sf,sf,sf,sf,sf}",
-		   "start", stats->start_time.tv_sec, "update", stats->last_update.tv_sec,
-	    "workers", stats->workers + stats->remote_workers, "users", stats->users + stats->remote_users,
-	    "disconnected", stats->disconnected,
-	    "shares", stats->accounted_shares, "sps1", stats->sps1, "sps5", stats->sps5,
-	    "sps15", stats->sps15, "sps60", stats->sps60, "accepted", stats->accounted_diff_shares,
-	    "rejected", stats->accounted_rejects, "dsps1", stats->dsps1, "dsps5", stats->dsps5,
-	    "dsps15", stats->dsps15, "dsps60", stats->dsps60, "dsps360", stats->dsps360,
-	    "dsps1440", stats->dsps1440, "dsps10080", stats->dsps10080);
+	val = json_object();
+	json_set_int(val, "start", stats->start_time.tv_sec);
+	json_set_int(val, "update", stats->last_update.tv_sec);
+	json_set_int(val, "workers", stats->workers + stats->remote_workers);
+	json_set_int(val, "users", stats->users + stats->remote_users);
+	json_set_int(val, "disconnected", stats->disconnected);
+	json_set_int64(val, "shares", stats->accounted_shares);
+	json_set_double(val, "sps1", isfinite(stats->sps1) ? stats->sps1 : 0.0);
+	json_set_double(val, "sps5", isfinite(stats->sps5) ? stats->sps5 : 0.0);
+	json_set_double(val, "sps15", isfinite(stats->sps15) ? stats->sps15 : 0.0);
+	json_set_double(val, "sps60", isfinite(stats->sps60) ? stats->sps60 : 0.0);
+	json_set_double(val, "accepted", isfinite(stats->accounted_diff_shares) ? stats->accounted_diff_shares : 0.0);
+	json_set_double(val, "rejected", isfinite(stats->accounted_rejects) ? stats->accounted_rejects : 0.0);
+	json_set_double(val, "dsps1", isfinite(stats->dsps1) ? stats->dsps1 : 0.0);
+	json_set_double(val, "dsps5", isfinite(stats->dsps5) ? stats->dsps5 : 0.0);
+	json_set_double(val, "dsps15", isfinite(stats->dsps15) ? stats->dsps15 : 0.0);
+	json_set_double(val, "dsps60", isfinite(stats->dsps60) ? stats->dsps60 : 0.0);
+	json_set_double(val, "dsps360", isfinite(stats->dsps360) ? stats->dsps360 : 0.0);
+	json_set_double(val, "dsps1440", isfinite(stats->dsps1440) ? stats->dsps1440 : 0.0);
+	json_set_double(val, "dsps10080", isfinite(stats->dsps10080) ? stats->dsps10080 : 0.0);
 	mutex_unlock(&sdata->stats_lock);
 
 	send_api_response(val, *sockd);
