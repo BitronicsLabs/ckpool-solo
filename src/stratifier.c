@@ -4504,7 +4504,7 @@ static void get_poolstats(sdata_t *sdata, int *sockd)
 	json_set_double(val, "dsps1440", isfinite(stats->dsps1440) ? stats->dsps1440 : 0.0);
 	json_set_double(val, "dsps10080", isfinite(stats->dsps10080) ? stats->dsps10080 : 0.0);
 	mutex_unlock(&sdata->stats_lock);
-
+	json_set_double(val, "mindiff", sdata->ckp->mindiff);
 	send_api_response(val, *sockd);
 }
 
