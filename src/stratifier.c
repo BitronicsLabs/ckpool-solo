@@ -5529,8 +5529,25 @@ static json_t *parse_authorise(stratum_instance_t *client, const json_t *params_
 			goto out;
 		}
 	}
-	if (!ckp->btcsolo || client->user_instance->btcaddress)
-		ret = true;
+	if (!ckp->btcsolo || client->user_instance->btcaddress) {
+		// Validate useragent before authorizing in solo mode
+		bool ua_valid = false;
+		if (client->useragent) {
+			for (int i = 0; i < ckp->useragents; i++) {
+				if (!safencmp(client->useragent, ckp->useragent[i], strlen(ckp->useragent[i]))) {
+					ua_valid = true;
+					break;
+				}
+			}
+		}
+		if (!ua_valid) {
+			LOGNOTICE("Rejecting authorization for client %"PRId64" with invalid useragent: %s",
+				  client->id, client->useragent ? client->useragent : "NULL");
+			ret = false;
+		} else {
+			ret = true;
+		}
+	}
 
 	/* We do the preauth etc. in remote mode, and leave final auth to
 	 * upstream pool to complete. */
@@ -5703,7 +5720,7 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double d
 	/* Set to lower of optimal and network_diff */
 	optimal = MIN(optimal, network_diff);
 
-	if (unlikely(optimal < 1))
+	if (unlikely(optimal < ckp->mindiff))
 		return;
 
 	if (client->diff == optimal)
