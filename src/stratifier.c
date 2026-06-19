@@ -3823,6 +3823,7 @@ static void block_solve(ckpool_t *ckp, json_t *val)
 		ASPRINTF(&msg, "Block %d solved by %s @ %s!", height, workername, ckp->name);
 		LOGWARNING("Solved and confirmed block %d by %s", height, workername);
 		user = user_by_workername(sdata, workername);
+		snapshot_group_solve(sdata, user);
 		worker = get_worker(sdata, user, workername);
 
 		ck_rlock(&sdata->instance_lock);
@@ -5717,6 +5718,56 @@ static void account_group_share(sdata_t *sdata, user_instance_t *user, const dou
 	mutex_unlock(&sdata->group_lock);
 }
 
+static void purge_group_window(sdata_t *sdata, const tv_t *now_t)
+{
+	group_contrib_t *group, *tmpgroup;
+	group_member_contrib_t *member, *tmpmember;
+	time_t cutoff = now_t->tv_sec - 86400;
+
+	mutex_lock(&sdata->group_lock);
+	HASH_ITER(hh, sdata->group_contribs, group, tmpgroup) {
+		HASH_ITER(hh, group->members, member, tmpmember) {
+			if (member->last_share.tv_sec && member->last_share.tv_sec < cutoff) {
+				group->total_diff_window -= member->accepted_diff_window;
+				group->total_shares_window -= member->accepted_shares_window;
+				HASH_DEL(group->members, member);
+				free(member);
+				group->member_count--;
+			}
+		}
+	}
+	mutex_unlock(&sdata->group_lock);
+}
+
+static void snapshot_group_solve(sdata_t *sdata, user_instance_t *user)
+{
+	group_contrib_t *group;
+	group_member_contrib_t *member;
+
+	if (!user || !user->group_name[0])
+		return;
+
+	mutex_lock(&sdata->group_lock);
+	HASH_FIND_STR(sdata->group_contribs, user->group_name, group);
+	if (!group) {
+		mutex_unlock(&sdata->group_lock);
+		return;
+	}
+
+	LOGWARNING("SOLO group solve snapshot: group=%s hidden=%s members=%d total_diff=%.0f total_shares=%" PRId64,
+		group->group_name, group->hidden ? "true" : "false", group->member_count,
+		group->total_diff_window, group->total_shares_window);
+	for (member = group->members; member; member = member->hh.next) {
+		double ratio = 0.0;
+		if (group->total_diff_window > 0)
+			ratio = member->accepted_diff_window / group->total_diff_window;
+		LOGWARNING("SOLO group member snapshot: group=%s address=%s worker=%s diff=%.0f shares=%" PRId64 " ratio=%.8f",
+			group->group_name, member->address, member->worker_label,
+			member->accepted_diff_window, member->accepted_shares_window, ratio);
+	}
+	mutex_unlock(&sdata->group_lock);
+}
+
 /* Needs to be entered with client holding a ref count. */
 static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double diff, const bool valid,
 		       const bool submit)
@@ -5744,6 +5795,7 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double d
 		return;
 
 	tv_time(&now_t);
+	purge_group_window(sdata, &now_t);
 
 	ck_rlock(&sdata->workbase_lock);
 	next_blockid = sdata->workbase_id;
