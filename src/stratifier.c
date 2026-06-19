@@ -5722,7 +5722,7 @@ static void purge_group_window(sdata_t *sdata, const tv_t *now_t)
 {
 	group_contrib_t *group, *tmpgroup;
 	group_member_contrib_t *member, *tmpmember;
-	time_t cutoff = now_t->tv_sec - 86400;
+	time_t cutoff = now_t->tv_sec - 21600;
 
 	mutex_lock(&sdata->group_lock);
 	HASH_ITER(hh, sdata->group_contribs, group, tmpgroup) {
