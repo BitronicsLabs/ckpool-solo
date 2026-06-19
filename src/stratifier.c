@@ -122,6 +122,29 @@ struct stratum_instance;
 typedef struct user_instance user_instance_t;
 typedef struct worker_instance worker_instance_t;
 typedef struct stratum_instance stratum_instance_t;
+typedef struct group_member_contrib group_member_contrib_t;
+typedef struct group_contrib group_contrib_t;
+
+struct group_member_contrib {
+	UT_hash_handle hh;
+	char address[128];
+	char worker_label[128];
+	double accepted_diff_window;
+	int64_t accepted_shares_window;
+	tv_t first_share_in_window;
+	tv_t last_share;
+};
+
+struct group_contrib {
+	UT_hash_handle hh;
+	char group_name[128];
+	bool hidden;
+	group_member_contrib_t *members;
+	double total_diff_window;
+	int64_t total_shares_window;
+	int member_count;
+	tv_t last_update;
+};
 
 struct user_instance {
 	UT_hash_handle hh;
@@ -441,6 +464,8 @@ struct stratifier_data {
 	ckmsgq_t *sshareq;	// Stratum share sends
 	ckmsgq_t *sauthq;	// Stratum authorisations
 	ckmsgq_t *stxnq;	// Transaction requests
+	group_contrib_t *group_contribs;
+	mutex_t group_lock;
 
 	int user_instance_id;
 
@@ -5350,22 +5375,65 @@ static worker_instance_t *get_worker(sdata_t *sdata, user_instance_t *user, cons
 /* This simply strips off the first part of the workername and matches it to a
  * user or creates a new one. Needs to be entered with client holding a ref
  * count. */
+static void parse_group_worker_identity(const char *workername, char *base_username, size_t base_sz,
+				      char *worker_label, size_t worker_sz,
+				      char *group_name, size_t group_sz,
+				      bool *group_hidden)
+{
+	char *tmp, *userpart, *workerpart, *hash;
+	if (base_username && base_sz)
+		base_username[0] = '\0';
+	if (worker_label && worker_sz)
+		worker_label[0] = '\0';
+	if (group_name && group_sz)
+		group_name[0] = '\0';
+	if (group_hidden)
+		*group_hidden = false;
+	if (!workername || !*workername)
+		return;
+	tmp = strdupa(workername);
+	userpart = strsep(&tmp, ".");
+	workerpart = tmp;
+	if (userpart && base_username && base_sz) {
+		strncpy(base_username, userpart, base_sz - 1);
+		base_username[base_sz - 1] = '\0';
+	}
+	if (!workerpart || !*workerpart)
+		return;
+	hash = strchr(workerpart, '#');
+	if (hash) {
+		*hash++ = '\0';
+		if (group_name && group_sz) {
+			strncpy(group_name, hash, group_sz - 1);
+			group_name[group_sz - 1] = '\0';
+			if (group_hidden) {
+				size_t len = strlen(group_name);
+				if (len > 7 && !strcmp(group_name + len - 7, ".hidden"))
+					*group_hidden = true;
+			}
+		}
+	}
+	if (worker_label && worker_sz) {
+		strncpy(worker_label, workerpart, worker_sz - 1);
+		worker_label[worker_sz - 1] = '\0';
+	}
+}
+
 static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 				      const char *workername)
 {
-	char *base_username = strdupa(workername), *username;
-	bool new_user = false, new_worker = false;
+	char username[128] = {0}, worker_label[128] = {0}, group_name[128] = {0};
+	bool new_user = false, new_worker = false, group_hidden = false;
 	sdata_t *sdata = ckp->sdata;
 	worker_instance_t *worker;
 	user_instance_t *user;
-	int len;
 
-	username = strsep(&base_username, "._");
-	if (!username || !strlen(username))
-		username = base_username;
-	len = strlen(username);
-	if (unlikely(len > 127))
-		username[127] = '\0';
+	parse_group_worker_identity(workername, username, sizeof(username), worker_label, sizeof(worker_label),
+				     group_name, sizeof(group_name), &group_hidden);
+	if (!strlen(username)) {
+		strncpy(username, workername, sizeof(username) - 1);
+		username[sizeof(username) - 1] = '\0';
+	}
 
 	user = get_create_user(sdata, username, &new_user);
 	worker = get_create_worker(sdata, user, workername, &new_worker);
@@ -5375,6 +5443,9 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 	ck_wlock(&sdata->instance_lock);
 	client->user_instance = user;
 	client->worker_instance = worker;
+	strncpy(user->worker_label, worker_label, sizeof(user->worker_label) - 1);
+	strncpy(user->group_name, group_name, sizeof(user->group_name) - 1);
+	user->group_hidden = group_hidden;
 	DL_APPEND2(user->clients, client, user_prev, user_next);
 	__inc_worker(sdata,user, worker);
 	ck_wunlock(&sdata->instance_lock);
