@@ -5757,6 +5757,7 @@ static void snapshot_group_solve(sdata_t *sdata, user_instance_t *user)
 	LOGWARNING("SOLO group solve snapshot: group=%s hidden=%s members=%d total_diff=%.0f total_shares=%" PRId64,
 		group->group_name, group->hidden ? "true" : "false", group->member_count,
 		group->total_diff_window, group->total_shares_window);
+	persist_group_snapshot(sdata->ckp, group);
 	for (member = group->members; member; member = member->hh.next) {
 		double ratio = 0.0;
 		if (group->total_diff_window > 0)
@@ -5766,6 +5767,52 @@ static void snapshot_group_solve(sdata_t *sdata, user_instance_t *user)
 			member->accepted_diff_window, member->accepted_shares_window, ratio);
 	}
 	mutex_unlock(&sdata->group_lock);
+}
+
+static void persist_group_snapshot(ckpool_t *ckp, group_contrib_t *group)
+{
+	char *fname = NULL;
+	FILE *fp;
+	json_t *root, *members;
+	group_member_contrib_t *member;
+	char *s;
+
+	if (!ckp || !group)
+		return;
+
+	members = json_array();
+	for (member = group->members; member; member = member->hh.next) {
+		double ratio = 0.0;
+		if (group->total_diff_window > 0)
+			ratio = member->accepted_diff_window / group->total_diff_window;
+		json_t *item = json_pack("{s:s,s:s,s:f,s:I,s:f}",
+			"address", member->address,
+			"worker_label", member->worker_label,
+			"accepted_diff_window", member->accepted_diff_window,
+			"accepted_shares_window", member->accepted_shares_window,
+			"ratio", ratio);
+		json_array_append_new(members, item);
+	}
+
+	root = json_pack("{s:s,s:b,s:i,s:f,s:I,s:o}",
+		"group_name", group->group_name,
+		"hidden", group->hidden,
+		"member_count", group->member_count,
+		"total_diff_window", group->total_diff_window,
+		"total_shares_window", group->total_shares_window,
+		"members", members);
+
+	ASPRINTF(&fname, "%s/pool/solo-groups-snapshots.jsonl", ckp->logdir);
+	fp = fopen(fname, "ae");
+	if (likely(fp)) {
+		s = json_dumps(root, JSON_COMPACT | JSON_EOL);
+		fprintf(fp, "%s", s);
+		free(s);
+		fclose(fp);
+	} else
+		LOGERR("Failed to fopen %s", fname);
+	dealloc(fname);
+	json_decref(root);
 }
 
 /* Needs to be entered with client holding a ref count. */
