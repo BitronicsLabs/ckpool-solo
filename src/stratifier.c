@@ -5666,6 +5666,57 @@ static double time_bias(const double tdiff, const double period)
 	return 1.0 - 1.0 / exp(dexp);
 }
 
+static group_contrib_t *get_create_group_contrib(sdata_t *sdata, const char *group_name, bool hidden)
+{
+	group_contrib_t *group = NULL;
+
+	if (!group_name || !*group_name)
+		return NULL;
+
+	mutex_lock(&sdata->group_lock);
+	HASH_FIND_STR(sdata->group_contribs, group_name, group);
+	if (!group) {
+		group = ckzalloc(sizeof(group_contrib_t));
+		strncpy(group->group_name, group_name, sizeof(group->group_name) - 1);
+		group->hidden = hidden;
+		HASH_ADD_STR(sdata->group_contribs, group_name, group);
+	}
+	mutex_unlock(&sdata->group_lock);
+
+	return group;
+}
+
+static void account_group_share(sdata_t *sdata, user_instance_t *user, const double diff, const tv_t *now_t)
+{
+	group_contrib_t *group;
+	group_member_contrib_t *member = NULL;
+
+	if (!user || !user->group_name[0] || !user->btcaddress)
+		return;
+
+	group = get_create_group_contrib(sdata, user->group_name, user->group_hidden);
+	if (!group)
+		return;
+
+	mutex_lock(&sdata->group_lock);
+	HASH_FIND_STR(group->members, user->username, member);
+	if (!member) {
+		member = ckzalloc(sizeof(group_member_contrib_t));
+		strncpy(member->address, user->username, sizeof(member->address) - 1);
+		strncpy(member->worker_label, user->worker_label, sizeof(member->worker_label) - 1);
+		copy_tv(&member->first_share_in_window, now_t);
+		HASH_ADD_STR(group->members, address, member);
+		group->member_count++;
+	}
+	member->accepted_diff_window += diff;
+	member->accepted_shares_window++;
+	copy_tv(&member->last_share, now_t);
+	group->total_diff_window += diff;
+	group->total_shares_window++;
+	copy_tv(&group->last_update, now_t);
+	mutex_unlock(&sdata->group_lock);
+}
+
 /* Needs to be entered with client holding a ref count. */
 static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double diff, const bool valid,
 		       const bool submit)
@@ -5717,6 +5768,8 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double d
 	decay_user(user, diff, &now_t);
 	copy_tv(&user->last_share, &now_t);
 	client->idle = false;
+	if (valid)
+		account_group_share(sdata, user, diff, &now_t);
 
 	/* Once we've updated user/client statistics in node mode, we can't
 	 * alter diff ourselves. */
@@ -8692,6 +8745,7 @@ void *stratifier(void *arg)
 		create_pthread(&pth_statsupdate, statsupdate, ckp);
 
 	mutex_init(&sdata->share_lock);
+	mutex_init(&sdata->group_lock);
 	if (!ckp->proxy)
 		create_pthread(&pth_zmqnotify, zmqnotify, ckp);
 
