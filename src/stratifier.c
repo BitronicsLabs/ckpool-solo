@@ -165,6 +165,10 @@ typedef struct group_payout_plan {
 	group_payout_output_t outputs[50];
 } group_payout_plan_t;
 
+#define SOLO_GROUP_MIN_OUTPUT_SATS 1000
+#define SOLO_GROUP_MIN_VALID_OUTPUTS 1
+
+
 struct user_instance {
 	UT_hash_handle hh;
 	char username[128];
@@ -1041,12 +1045,17 @@ static bool build_group_coinbase_outputs(sdata_t *sdata, user_instance_t *user, 
 	if (!build_group_payout_plan(sdata, user, reward_sats, &plan))
 		return false;
 
+	int valid_outputs = 0;
+
 	buf = ckzalloc(2048);
 	for (int i = 0; i < plan.output_count; i++) {
 		uchar txnbin[48] = {0};
 		int txnlen;
 		uint64_t sats;
 		bool script = false, segwit = false;
+
+		if (plan.outputs[i].payout_sats < SOLO_GROUP_MIN_OUTPUT_SATS)
+			continue;
 		if (!generator_checkaddr(sdata->ckp, plan.outputs[i].address, &script, &segwit))
 			continue;
 		txnlen = address_to_txn((char *)txnbin, plan.outputs[i].address, script, segwit);
@@ -1058,8 +1067,10 @@ static bool build_group_coinbase_outputs(sdata_t *sdata, user_instance_t *user, 
 		buf[offset++] = txnlen;
 		memcpy(buf + offset, txnbin, txnlen);
 		offset += txnlen;
+		valid_outputs++;
 	}
-	if (!offset) {
+	if (!offset || valid_outputs < SOLO_GROUP_MIN_VALID_OUTPUTS) {
+		LOGWARNING("SOLO group payout fallback: invalid or incomplete outputs for group=%s", plan.group_name);
 		free(buf);
 		return false;
 	}
@@ -1086,6 +1097,7 @@ static void __generate_userwb(sdata_t *sdata, workbase_t *wb, user_instance_t *u
 		uchar *group_outputs = NULL;
 		int group_outputs_len = 0;
 		if (user->group_name[0] && build_group_coinbase_outputs(sdata, user, wb->coinbasevalue, &group_outputs, &group_outputs_len)) {
+			LOGWARNING("SOLO group job coinbase enabled: user=%s group=%s outputs_len=%d reward=%" PRIu64, user->username, user->group_name, group_outputs_len, wb->coinbasevalue);
 			userwb->coinb2bin = ckalloc(wb->coinb2len + group_outputs_len + wb->coinb3len);
 			memcpy(userwb->coinb2bin, wb->coinb2bin, wb->coinb2len);
 			userwb->coinb2len = wb->coinb2len;
@@ -1095,6 +1107,8 @@ static void __generate_userwb(sdata_t *sdata, workbase_t *wb, user_instance_t *u
 			userwb->coinb2len += wb->coinb3len;
 			free(group_outputs);
 		} else {
+			if (user->group_name[0])
+				LOGWARNING("SOLO group payout fallback to single-output coinbase: user=%s group=%s", user->username, user->group_name);
 			userwb->coinb2bin = ckalloc(wb->coinb2len + 1 + user->txnlen + wb->coinb3len);
 			memcpy(userwb->coinb2bin, wb->coinb2bin, wb->coinb2len);
 			userwb->coinb2len = wb->coinb2len;
@@ -5906,7 +5920,34 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 			assigned += out->payout_sats;
 		}
 	}
-	plan->assigned_sats = reward_sats;
+
+	for (int i = 0; i < count; i++) {
+		group_payout_output_t *out = &plan->outputs[i];
+		if (out->payout_sats < SOLO_GROUP_MIN_OUTPUT_SATS)
+			out->payout_sats = 0;
+	}
+
+	assigned = 0;
+	for (int i = 0; i < count; i++)
+		assigned += plan->outputs[i].payout_sats;
+
+	if (!assigned)
+		return false;
+
+	if (assigned < reward_sats) {
+		for (int i = 0; i < count; i++) {
+			if (plan->outputs[i].payout_sats > 0) {
+				plan->outputs[i].payout_sats += reward_sats - assigned;
+				assigned = reward_sats;
+				break;
+			}
+		}
+	}
+
+	plan->assigned_sats = assigned;
+	if (plan->assigned_sats != reward_sats)
+		return false;
+
 	return true;
 }
 
