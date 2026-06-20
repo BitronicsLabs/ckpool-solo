@@ -1046,9 +1046,12 @@ static bool build_group_coinbase_outputs(sdata_t *sdata, user_instance_t *user, 
 		uchar txnbin[48] = {0};
 		int txnlen;
 		uint64_t sats;
-		if (!generator_checkaddr(sdata->ckp, plan.outputs[i].address, NULL, NULL))
+		bool script = false, segwit = false;
+		if (!generator_checkaddr(sdata->ckp, plan.outputs[i].address, &script, &segwit))
 			continue;
-		txnlen = address_to_txn((char *)txnbin, plan.outputs[i].address, false, false);
+		txnlen = address_to_txn((char *)txnbin, plan.outputs[i].address, script, segwit);
+		if (txnlen <= 0)
+			continue;
 		sats = htole64(plan.outputs[i].payout_sats);
 		memcpy(buf + offset, &sats, 8);
 		offset += 8;
