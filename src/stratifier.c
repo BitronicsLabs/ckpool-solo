@@ -1031,6 +1031,40 @@ static void send_workinfo(ckpool_t *ckp, sdata_t *sdata, const workbase_t *wb)
 		send_node_workinfo(ckp, sdata, wb);
 }
 
+static bool build_group_coinbase_outputs(sdata_t *sdata, user_instance_t *user, uint64_t reward_sats,
+				      uchar **out_bin, int *out_len)
+{
+	group_payout_plan_t plan;
+	uchar *buf;
+	int offset = 0;
+
+	if (!build_group_payout_plan(sdata, user, reward_sats, &plan))
+		return false;
+
+	buf = ckzalloc(2048);
+	for (int i = 0; i < plan.output_count; i++) {
+		uchar txnbin[48] = {0};
+		int txnlen;
+		uint64_t sats;
+		if (!generator_checkaddr(sdata->ckp, plan.outputs[i].address, NULL, NULL))
+			continue;
+		txnlen = address_to_txn((char *)txnbin, plan.outputs[i].address, false, false);
+		sats = htole64(plan.outputs[i].payout_sats);
+		memcpy(buf + offset, &sats, 8);
+		offset += 8;
+		buf[offset++] = txnlen;
+		memcpy(buf + offset, txnbin, txnlen);
+		offset += txnlen;
+	}
+	if (!offset) {
+		free(buf);
+		return false;
+	}
+	*out_bin = buf;
+	*out_len = offset;
+	return true;
+}
+
 /* Entered with instance_lock held, make sure wb can't be pulled from us */
 static void __generate_userwb(sdata_t *sdata, workbase_t *wb, user_instance_t *user)
 {
@@ -1045,15 +1079,30 @@ static void __generate_userwb(sdata_t *sdata, workbase_t *wb, user_instance_t *u
 	sdata->userwbs_generated++;
 	userwb = ckzalloc(sizeof(struct userwb));
 	userwb->id = id;
-	userwb->coinb2bin = ckalloc(wb->coinb2len + 1 + user->txnlen + wb->coinb3len);
-	memcpy(userwb->coinb2bin, wb->coinb2bin, wb->coinb2len);
-	userwb->coinb2len = wb->coinb2len;
-	userwb->coinb2bin[userwb->coinb2len++] = user->txnlen;
-	memcpy(userwb->coinb2bin + userwb->coinb2len, user->txnbin, user->txnlen);
-	userwb->coinb2len += user->txnlen;
-	memcpy(userwb->coinb2bin + userwb->coinb2len, wb->coinb3bin, wb->coinb3len);
-	userwb->coinb2len += wb->coinb3len;
-	userwb->coinb2 = bin2hex(userwb->coinb2bin, userwb->coinb2len);
+	{
+		uchar *group_outputs = NULL;
+		int group_outputs_len = 0;
+		if (user->group_name[0] && build_group_coinbase_outputs(sdata, user, wb->coinbasevalue, &group_outputs, &group_outputs_len)) {
+			userwb->coinb2bin = ckalloc(wb->coinb2len + group_outputs_len + wb->coinb3len);
+			memcpy(userwb->coinb2bin, wb->coinb2bin, wb->coinb2len);
+			userwb->coinb2len = wb->coinb2len;
+			memcpy(userwb->coinb2bin + userwb->coinb2len, group_outputs, group_outputs_len);
+			userwb->coinb2len += group_outputs_len;
+			memcpy(userwb->coinb2bin + userwb->coinb2len, wb->coinb3bin, wb->coinb3len);
+			userwb->coinb2len += wb->coinb3len;
+			free(group_outputs);
+		} else {
+			userwb->coinb2bin = ckalloc(wb->coinb2len + 1 + user->txnlen + wb->coinb3len);
+			memcpy(userwb->coinb2bin, wb->coinb2bin, wb->coinb2len);
+			userwb->coinb2len = wb->coinb2len;
+			userwb->coinb2bin[userwb->coinb2len++] = user->txnlen;
+			memcpy(userwb->coinb2bin + userwb->coinb2len, user->txnbin, user->txnlen);
+			userwb->coinb2len += user->txnlen;
+			memcpy(userwb->coinb2bin + userwb->coinb2len, wb->coinb3bin, wb->coinb3len);
+			userwb->coinb2len += wb->coinb3len;
+		}
+		userwb->coinb2 = bin2hex(userwb->coinb2bin, userwb->coinb2len);
+	}
 	HASH_ADD_I64(user->userwbs, id, userwb);
 }
 
