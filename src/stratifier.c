@@ -146,6 +146,25 @@ struct group_contrib {
 	tv_t last_update;
 };
 
+
+typedef struct group_payout_output {
+	char address[128];
+	char worker_label[128];
+	double ratio;
+	double accepted_diff_window;
+	int64_t accepted_shares_window;
+	uint64_t payout_sats;
+} group_payout_output_t;
+
+typedef struct group_payout_plan {
+	char group_name[128];
+	bool hidden;
+	int output_count;
+	uint64_t total_reward_sats;
+	uint64_t assigned_sats;
+	group_payout_output_t outputs[50];
+} group_payout_plan_t;
+
 struct user_instance {
 	UT_hash_handle hh;
 	char username[128];
@@ -5743,6 +5762,7 @@ static void snapshot_group_solve(sdata_t *sdata, user_instance_t *user)
 {
 	group_contrib_t *group;
 	group_member_contrib_t *member;
+	group_payout_plan_t plan;
 
 	if (!user || !user->group_name[0])
 		return;
@@ -5753,6 +5773,9 @@ static void snapshot_group_solve(sdata_t *sdata, user_instance_t *user)
 		mutex_unlock(&sdata->group_lock);
 		return;
 	}
+
+	if (build_group_payout_plan(sdata, user, (uint64_t)sdata->current_workbase->coinbasevalue, &plan))
+		LOGWARNING("SOLO group payout plan ready: group=%s outputs=%d reward=%" PRIu64, plan.group_name, plan.output_count, plan.total_reward_sats);
 
 	LOGWARNING("SOLO group solve snapshot: group=%s hidden=%s members=%d total_diff=%.0f total_shares=%" PRId64,
 		group->group_name, group->hidden ? "true" : "false", group->member_count,
@@ -5767,6 +5790,72 @@ static void snapshot_group_solve(sdata_t *sdata, user_instance_t *user)
 			member->accepted_diff_window, member->accepted_shares_window, ratio);
 	}
 	mutex_unlock(&sdata->group_lock);
+}
+
+static int compare_group_payout_output(const void *a, const void *b)
+{
+	const group_payout_output_t *oa = a;
+	const group_payout_output_t *ob = b;
+	if (ob->accepted_diff_window > oa->accepted_diff_window)
+		return 1;
+	if (ob->accepted_diff_window < oa->accepted_diff_window)
+		return -1;
+	return strcmp(oa->address, ob->address);
+}
+
+static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint64_t reward_sats, group_payout_plan_t *plan)
+{
+	group_contrib_t *group;
+	group_member_contrib_t *member;
+	int count = 0;
+	double total = 0.0;
+	uint64_t assigned = 0;
+
+	if (!user || !user->group_name[0] || !plan)
+		return false;
+
+	memset(plan, 0, sizeof(*plan));
+	mutex_lock(&sdata->group_lock);
+	HASH_FIND_STR(sdata->group_contribs, user->group_name, group);
+	if (!group || !group->member_count || group->total_diff_window <= 0) {
+		mutex_unlock(&sdata->group_lock);
+		return false;
+	}
+
+	strncpy(plan->group_name, group->group_name, sizeof(plan->group_name) - 1);
+	plan->hidden = group->hidden;
+	plan->total_reward_sats = reward_sats;
+
+	for (member = group->members; member && count < 50; member = member->hh.next) {
+		if (member->accepted_diff_window <= 0)
+			continue;
+		strncpy(plan->outputs[count].address, member->address, sizeof(plan->outputs[count].address) - 1);
+		strncpy(plan->outputs[count].worker_label, member->worker_label, sizeof(plan->outputs[count].worker_label) - 1);
+		plan->outputs[count].accepted_diff_window = member->accepted_diff_window;
+		plan->outputs[count].accepted_shares_window = member->accepted_shares_window;
+		total += member->accepted_diff_window;
+		count++;
+	}
+	mutex_unlock(&sdata->group_lock);
+
+	if (!count || total <= 0)
+		return false;
+
+	qsort(plan->outputs, count, sizeof(group_payout_output_t), compare_group_payout_output);
+	plan->output_count = count;
+
+	for (int i = 0; i < count; i++) {
+		group_payout_output_t *out = &plan->outputs[i];
+		out->ratio = out->accepted_diff_window / total;
+		if (i == count - 1)
+			out->payout_sats = reward_sats - assigned;
+		else {
+			out->payout_sats = (uint64_t)((double)reward_sats * out->ratio);
+			assigned += out->payout_sats;
+		}
+	}
+	plan->assigned_sats = reward_sats;
+	return true;
 }
 
 static void persist_group_snapshot(ckpool_t *ckp, group_contrib_t *group)
