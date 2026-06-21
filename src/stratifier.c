@@ -177,6 +177,9 @@ struct user_instance {
 	bool btcaddress;
 	bool script;
 	bool segwit;
+	char worker_label[128];
+	char group_name[128];
+	bool group_hidden;
 
 	/* A linked list of all connected instances of this user */
 	stratum_instance_t *clients;
@@ -247,6 +250,10 @@ struct worker_instance {
 typedef struct stratifier_data sdata_t;
 
 typedef struct proxy_base proxy_t;
+
+static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint64_t reward_sats, group_payout_plan_t *plan);
+static void snapshot_group_solve(sdata_t *sdata, user_instance_t *user);
+static void persist_group_snapshot(ckpool_t *ckp, group_contrib_t *group);
 
 /* Per client stratum instance == workers */
 struct stratum_instance {
