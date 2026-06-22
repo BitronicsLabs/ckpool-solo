@@ -254,6 +254,7 @@ typedef struct proxy_base proxy_t;
 static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint64_t reward_sats, group_payout_plan_t *plan);
 static void snapshot_group_solve(sdata_t *sdata, user_instance_t *user);
 static void persist_group_snapshot(ckpool_t *ckp, group_contrib_t *group);
+static void persist_current_group_payout_context(ckpool_t *ckp, const group_payout_plan_t *plan);
 
 /* Per client stratum instance == workers */
 struct stratum_instance {
@@ -1051,6 +1052,7 @@ static bool build_group_coinbase_outputs(sdata_t *sdata, user_instance_t *user, 
 
 	if (!build_group_payout_plan(sdata, user, reward_sats, &plan))
 		return false;
+	persist_current_group_payout_context(sdata->ckp, &plan);
 
 	int valid_outputs = 0;
 
@@ -6000,6 +6002,66 @@ static void persist_group_snapshot(ckpool_t *ckp, group_contrib_t *group)
 		fclose(fp);
 	} else
 		LOGERR("Failed to fopen %s", fname);
+	dealloc(fname);
+	json_decref(root);
+}
+
+static void persist_current_group_payout_context(ckpool_t *ckp, const group_payout_plan_t *plan)
+{
+	char *fname = NULL, *tmpfname = NULL;
+	json_error_t err;
+	json_t *root = NULL, *entry, *outputs;
+	char *serialized;
+	FILE *fp;
+
+	if (!ckp || !plan || !plan->group_name[0])
+		return;
+
+	ASPRINTF(&fname, "%s/pool/current-group-payout-contexts.json", ckp->logdir);
+	ASPRINTF(&tmpfname, "%s.tmp", fname);
+	root = json_load_file(fname, 0, &err);
+	if (!root || !json_is_object(root)) {
+		if (root)
+			json_decref(root);
+		root = json_object();
+	}
+
+	outputs = json_array();
+	for (int i = 0; i < plan->output_count; i++) {
+		const group_payout_output_t *out = &plan->outputs[i];
+		json_t *item = json_pack("{s:s,s:s,s:f,s:f,s:I,s:I}",
+			"address", out->address,
+			"worker_label", out->worker_label,
+			"ratio", out->ratio,
+			"accepted_diff_window", out->accepted_diff_window,
+			"accepted_shares_window", out->accepted_shares_window,
+			"payout_sats", out->payout_sats);
+		json_array_append_new(outputs, item);
+	}
+
+	entry = json_pack("{s:s,s:b,s:i,s:I,s:I,s:i,s:I,s:o}",
+		"group_name", plan->group_name,
+		"hidden", plan->hidden,
+		"output_count", plan->output_count,
+		"total_reward_sats", plan->total_reward_sats,
+		"assigned_sats", plan->assigned_sats,
+		"member_count", plan->output_count,
+		"updated_at_epoch", (json_int_t)time(NULL),
+		"outputs", outputs);
+	json_object_set_new(root, plan->group_name, entry);
+
+	serialized = json_dumps(root, JSON_INDENT(2) | JSON_SORT_KEYS);
+	fp = fopen(tmpfname, "we");
+	if (likely(fp)) {
+		fprintf(fp, "%s\n", serialized);
+		fclose(fp);
+		if (rename(tmpfname, fname) != 0)
+			LOGERR("Failed to rename %s to %s", tmpfname, fname);
+	} else
+		LOGERR("Failed to fopen %s", tmpfname);
+
+	free(serialized);
+	dealloc(tmpfname);
 	dealloc(fname);
 	json_decref(root);
 }
