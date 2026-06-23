@@ -254,6 +254,10 @@ struct ckpool_instance {
 	bool donvalid; // Donation address works on this network
 	double donation; // Percentage donation to development
 
+	/* SOLO Groups fee options */
+	char *solo_group_fee_address; // Fixed fee address for SOLO Groups
+	double solo_group_fee_percent; // Fixed fee percentage for SOLO Groups
+
 	/* Stratum options */
 	server_instance_t **servers;
 	char **serverurl; // Array of URLs to bind our server/proxy to

@@ -154,6 +154,7 @@ typedef struct group_payout_output {
 	double accepted_diff_window;
 	int64_t accepted_shares_window;
 	uint64_t payout_sats;
+	bool fee_output;
 } group_payout_output_t;
 
 typedef struct group_payout_plan {
@@ -5885,6 +5886,10 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 	int count = 0;
 	double total = 0.0;
 	uint64_t assigned = 0;
+	uint64_t fee_sats = 0;
+	uint64_t member_reward_sats = reward_sats;
+	double fee_percent = 0.0;
+	const char *fee_address = NULL;
 
 	if (!user || !user->group_name[0] || !plan)
 		return false;
@@ -5901,19 +5906,35 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 	plan->hidden = group->hidden;
 	plan->total_reward_sats = reward_sats;
 
-	for (member = group->members; member && count < 50; member = member->hh.next) {
+	for (member = group->members; member && count < 49; member = member->hh.next) {
 		if (member->accepted_diff_window <= 0)
 			continue;
 		strncpy(plan->outputs[count].address, member->address, sizeof(plan->outputs[count].address) - 1);
 		strncpy(plan->outputs[count].worker_label, member->worker_label, sizeof(plan->outputs[count].worker_label) - 1);
 		plan->outputs[count].accepted_diff_window = member->accepted_diff_window;
 		plan->outputs[count].accepted_shares_window = member->accepted_shares_window;
+		plan->outputs[count].fee_output = false;
 		total += member->accepted_diff_window;
 		count++;
 	}
 	mutex_unlock(&sdata->group_lock);
 
 	if (!count || total <= 0)
+		return false;
+
+	fee_percent = sdata->ckp->solo_group_fee_percent;
+	fee_address = sdata->ckp->solo_group_fee_address;
+	if (fee_percent > 0.0) {
+		if (!fee_address || !fee_address[0])
+			return false;
+		fee_sats = (uint64_t)((double)reward_sats * (fee_percent / 100.0));
+	}
+	if (fee_sats > 0 && fee_sats < SOLO_GROUP_MIN_OUTPUT_SATS)
+		fee_sats = SOLO_GROUP_MIN_OUTPUT_SATS;
+	if (fee_sats >= reward_sats)
+		return false;
+	member_reward_sats = reward_sats - fee_sats;
+	if (!member_reward_sats)
 		return false;
 
 	qsort(plan->outputs, count, sizeof(group_payout_output_t), compare_group_payout_output);
@@ -5923,9 +5944,9 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 		group_payout_output_t *out = &plan->outputs[i];
 		out->ratio = out->accepted_diff_window / total;
 		if (i == count - 1)
-			out->payout_sats = reward_sats - assigned;
+			out->payout_sats = member_reward_sats - assigned;
 		else {
-			out->payout_sats = (uint64_t)((double)reward_sats * out->ratio);
+			out->payout_sats = (uint64_t)((double)member_reward_sats * out->ratio);
 			assigned += out->payout_sats;
 		}
 	}
@@ -5943,16 +5964,34 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 	if (!assigned)
 		return false;
 
-	if (assigned < reward_sats) {
+	if (assigned < member_reward_sats) {
 		for (int i = 0; i < count; i++) {
 			if (plan->outputs[i].payout_sats > 0) {
-				plan->outputs[i].payout_sats += reward_sats - assigned;
-				assigned = reward_sats;
+				plan->outputs[i].payout_sats += member_reward_sats - assigned;
+				assigned = member_reward_sats;
 				break;
 			}
 		}
 	}
 
+	if (assigned != member_reward_sats)
+		return false;
+
+	if (fee_sats > 0) {
+		group_payout_output_t *fee_out;
+		if (count >= 50)
+			return false;
+		fee_out = &plan->outputs[count++];
+		memset(fee_out, 0, sizeof(*fee_out));
+		strncpy(fee_out->address, fee_address, sizeof(fee_out->address) - 1);
+		strncpy(fee_out->worker_label, "group-fee", sizeof(fee_out->worker_label) - 1);
+		fee_out->ratio = (double)fee_sats / (double)reward_sats;
+		fee_out->payout_sats = fee_sats;
+		fee_out->fee_output = true;
+		assigned += fee_sats;
+	}
+
+	plan->output_count = count;
 	plan->assigned_sats = assigned;
 	if (plan->assigned_sats != reward_sats)
 		return false;
@@ -6029,13 +6068,14 @@ static void persist_current_group_payout_context(ckpool_t *ckp, const group_payo
 	outputs = json_array();
 	for (int i = 0; i < plan->output_count; i++) {
 		const group_payout_output_t *out = &plan->outputs[i];
-		json_t *item = json_pack("{s:s,s:s,s:f,s:f,s:I,s:I}",
+		json_t *item = json_pack("{s:s,s:s,s:f,s:f,s:I,s:I,s:b}",
 			"address", out->address,
 			"worker_label", out->worker_label,
 			"ratio", out->ratio,
 			"accepted_diff_window", out->accepted_diff_window,
 			"accepted_shares_window", out->accepted_shares_window,
-			"payout_sats", out->payout_sats);
+			"payout_sats", out->payout_sats,
+			"fee_output", out->fee_output);
 		json_array_append_new(outputs, item);
 	}
 

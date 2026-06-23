@@ -1485,6 +1485,12 @@ static void parse_config(ckpool_t *ckp)
 		ckp->donation = 0;
 	else if (ckp->donation > 99.9)
 		ckp->donation = 99.9;
+	json_get_string(&ckp->solo_group_fee_address, json_conf, "solo_group_fee_address");
+	json_get_double(&ckp->solo_group_fee_percent, json_conf, "solo_group_fee_percent");
+	if (ckp->solo_group_fee_percent < 0.0)
+		ckp->solo_group_fee_percent = 0.0;
+	else if (ckp->solo_group_fee_percent > 99.9)
+		ckp->solo_group_fee_percent = 99.9;
 	arr_val = json_object_get(json_conf, "proxy");
 	if (arr_val && json_is_array(arr_val)) {
 		arr_size = json_array_size(arr_val);
