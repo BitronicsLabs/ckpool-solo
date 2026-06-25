@@ -163,7 +163,7 @@ typedef struct group_payout_plan {
 	int output_count;
 	uint64_t total_reward_sats;
 	uint64_t assigned_sats;
-	group_payout_output_t outputs[50];
+	group_payout_output_t outputs[51];
 } group_payout_plan_t;
 
 #define SOLO_GROUP_MIN_OUTPUT_SATS 1000
@@ -5918,7 +5918,7 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 	plan->hidden = group->hidden;
 	plan->total_reward_sats = reward_sats;
 
-	for (member = group->members; member && count < 49; member = member->hh.next) {
+	for (member = group->members; member && count < 50; member = member->hh.next) {
 		if (member->accepted_diff_window <= 0)
 			continue;
 		strncpy(plan->outputs[count].address, member->address, sizeof(plan->outputs[count].address) - 1);
@@ -5991,7 +5991,7 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 
 	if (fee_sats > 0) {
 		group_payout_output_t *fee_out;
-		if (count >= 50)
+		if (count >= 51)
 			return false;
 		fee_out = &plan->outputs[count++];
 		memset(fee_out, 0, sizeof(*fee_out));
