@@ -253,8 +253,11 @@ typedef struct stratifier_data sdata_t;
 typedef struct proxy_base proxy_t;
 
 static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint64_t reward_sats, group_payout_plan_t *plan);
-static void snapshot_group_solve(sdata_t *sdata, user_instance_t *user);
-static void persist_group_snapshot(ckpool_t *ckp, group_contrib_t *group);
+static void snapshot_group_solve(sdata_t *sdata, user_instance_t *user, int height, const char *blockhash,
+				      const char *workername, time_t solved_at_epoch, uint64_t reward_sats);
+static void persist_group_snapshot(ckpool_t *ckp, group_contrib_t *group, user_instance_t *user,
+				   int height, const char *blockhash, const char *workername,
+				   time_t solved_at_epoch, uint64_t reward_sats);
 static void persist_current_group_payout_context(ckpool_t *ckp, const group_payout_plan_t *plan);
 
 /* Per client stratum instance == workers */
@@ -3917,8 +3920,16 @@ static void block_solve(ckpool_t *ckp, json_t *val)
 
 		ASPRINTF(&msg, "Block %d solved by %s @ %s!", height, workername, ckp->name);
 		LOGWARNING("Solved and confirmed block %d by %s", height, workername);
+		char *blockhash = NULL;
+		int64_t reward = 0;
+		uint64_t reward_sats = 0;
+
 		user = user_by_workername(sdata, workername);
-		snapshot_group_solve(sdata, user);
+		json_get_string(&blockhash, val, "blockhash");
+		json_get_int64(&reward, val, "reward");
+		if (reward > 0)
+			reward_sats = (uint64_t)reward;
+		snapshot_group_solve(sdata, user, height, blockhash, workername, ts_now.tv_sec, reward_sats);
 		worker = get_worker(sdata, user, workername);
 
 		ck_rlock(&sdata->instance_lock);
@@ -5834,7 +5845,8 @@ static void purge_group_window(sdata_t *sdata, const tv_t *now_t)
 	mutex_unlock(&sdata->group_lock);
 }
 
-static void snapshot_group_solve(sdata_t *sdata, user_instance_t *user)
+static void snapshot_group_solve(sdata_t *sdata, user_instance_t *user, int height, const char *blockhash,
+				      const char *workername, time_t solved_at_epoch, uint64_t reward_sats)
 {
 	group_contrib_t *group;
 	group_member_contrib_t *member;
@@ -5856,7 +5868,7 @@ static void snapshot_group_solve(sdata_t *sdata, user_instance_t *user)
 	LOGWARNING("SOLO group solve snapshot: group=%s hidden=%s members=%d total_diff=%.0f total_shares=%" PRId64,
 		group->group_name, group->hidden ? "true" : "false", group->member_count,
 		group->total_diff_window, group->total_shares_window);
-	persist_group_snapshot(sdata->ckp, group);
+	persist_group_snapshot(sdata->ckp, group, user, height, blockhash, workername, solved_at_epoch, reward_sats);
 	for (member = group->members; member; member = member->hh.next) {
 		double ratio = 0.0;
 		if (group->total_diff_window > 0)
@@ -5999,7 +6011,9 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 	return true;
 }
 
-static void persist_group_snapshot(ckpool_t *ckp, group_contrib_t *group)
+static void persist_group_snapshot(ckpool_t *ckp, group_contrib_t *group, user_instance_t *user,
+				   int height, const char *blockhash, const char *workername,
+				   time_t solved_at_epoch, uint64_t reward_sats)
 {
 	char *fname = NULL;
 	FILE *fp;
@@ -6024,12 +6038,18 @@ static void persist_group_snapshot(ckpool_t *ckp, group_contrib_t *group)
 		json_array_append_new(members, item);
 	}
 
-	root = json_pack("{s:s,s:b,s:i,s:f,s:I,s:o}",
+	root = json_pack("{s:s,s:b,s:i,s:f,s:I,s:I,s:i,s:s,s:s,s:I,s:o}",
 		"group_name", group->group_name,
 		"hidden", group->hidden,
 		"member_count", group->member_count,
 		"total_diff_window", group->total_diff_window,
 		"total_shares_window", group->total_shares_window,
+		"solved_at_epoch", (int)solved_at_epoch,
+		"block_height", height > 0 ? height : 0,
+		"block_hash", blockhash ? blockhash : "",
+		"solved_by_address", user && user->btcaddress ? user->username : "",
+		"solved_by_worker", workername ? workername : "",
+		"reward_sats", reward_sats,
 		"members", members);
 
 	ASPRINTF(&fname, "%s/pool/solo-groups-snapshots.jsonl", ckp->logdir);
