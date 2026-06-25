@@ -5806,10 +5806,10 @@ static void account_group_share(sdata_t *sdata, user_instance_t *user, const dou
 		return;
 
 	mutex_lock(&sdata->group_lock);
-	HASH_FIND_STR(group->members, user->btcaddress, member);
+	HASH_FIND_STR(group->members, user->username, member);
 	if (!member) {
 		member = ckzalloc(sizeof(group_member_contrib_t));
-		strncpy(member->address, user->btcaddress, sizeof(member->address) - 1);
+		strncpy(member->address, user->username, sizeof(member->address) - 1);
 		strncpy(member->worker_label, user->worker_label, sizeof(member->worker_label) - 1);
 		copy_tv(&member->first_share_in_window, now_t);
 		HASH_ADD_STR(group->members, address, member);
