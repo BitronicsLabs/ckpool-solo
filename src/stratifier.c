@@ -5942,13 +5942,22 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 	double fee_percent = 0.0;
 	const char *fee_address = NULL;
 
-	if (!user || !user->group_name[0] || !plan)
+	if (!user || !user->group_name[0] || !plan) {
+		LOGERR("SOLO SNAP build plan abort: invalid args user=%p group=%s plan=%p",
+			(void *)user,
+			(user && user->group_name[0]) ? user->group_name : "",
+			(void *)plan);
 		return false;
+	}
 
 	memset(plan, 0, sizeof(*plan));
 	mutex_lock(&sdata->group_lock);
 		HASH_FIND_STR(sdata->group_contribs, user->group_name, group);
 		if (!group || !group->member_count || group->total_diff_window <= 0) {
+			LOGERR("SOLO SNAP build plan abort: missing group state group=%s group_ptr=%p members=%d total_diff=%.0f",
+				user->group_name, (void *)group,
+				group ? group->member_count : 0,
+				group ? group->total_diff_window : 0.0);
 			mutex_unlock(&sdata->group_lock);
 			return false;
 		}
@@ -5970,23 +5979,35 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 	}
 	mutex_unlock(&sdata->group_lock);
 
-	if (!count || total <= 0)
+	if (!count || total <= 0) {
+		LOGERR("SOLO SNAP build plan abort: no valid members group=%s count=%d total=%.8f",
+			user->group_name, count, total);
 		return false;
+	}
 
 	fee_percent = sdata->ckp->solo_group_fee_percent;
 	fee_address = sdata->ckp->solo_group_fee_address;
 	if (fee_percent > 0.0) {
-		if (!fee_address || !fee_address[0])
+		if (!fee_address || !fee_address[0]) {
+			LOGERR("SOLO SNAP build plan abort: fee enabled without fee address group=%s fee_percent=%.4f",
+				user->group_name, fee_percent);
 			return false;
+		}
 		fee_sats = (uint64_t)((double)reward_sats * (fee_percent / 100.0));
 	}
 	if (fee_sats > 0 && fee_sats < SOLO_GROUP_MIN_OUTPUT_SATS)
 		fee_sats = SOLO_GROUP_MIN_OUTPUT_SATS;
-	if (fee_sats >= reward_sats)
+	if (fee_sats >= reward_sats) {
+		LOGERR("SOLO SNAP build plan abort: fee eats reward group=%s fee_sats=%" PRIu64 " reward_sats=%" PRIu64,
+			user->group_name, fee_sats, reward_sats);
 		return false;
+	}
 	member_reward_sats = reward_sats - fee_sats;
-	if (!member_reward_sats)
+	if (!member_reward_sats) {
+		LOGERR("SOLO SNAP build plan abort: empty member reward group=%s reward_sats=%" PRIu64 " fee_sats=%" PRIu64,
+			user->group_name, reward_sats, fee_sats);
 		return false;
+	}
 
 	qsort(plan->outputs, count, sizeof(group_payout_output_t), compare_group_payout_output);
 	plan->output_count = count;
@@ -6012,8 +6033,11 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 	for (int i = 0; i < count; i++)
 		assigned += plan->outputs[i].payout_sats;
 
-	if (!assigned)
+	if (!assigned) {
+		LOGERR("SOLO SNAP build plan abort: all payouts zeroed group=%s member_reward_sats=%" PRIu64,
+			user->group_name, member_reward_sats);
 		return false;
+	}
 
 	if (assigned < member_reward_sats) {
 		for (int i = 0; i < count; i++) {
@@ -6025,13 +6049,19 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 		}
 	}
 
-	if (assigned != member_reward_sats)
+	if (assigned != member_reward_sats) {
+		LOGERR("SOLO SNAP build plan abort: member assignment mismatch group=%s assigned=%" PRIu64 " expected=%" PRIu64,
+			user->group_name, assigned, member_reward_sats);
 		return false;
+	}
 
 	if (fee_sats > 0) {
 		group_payout_output_t *fee_out;
-		if (count >= 51)
+		if (count >= 51) {
+			LOGERR("SOLO SNAP build plan abort: too many outputs group=%s count=%d",
+				user->group_name, count);
 			return false;
+		}
 		fee_out = &plan->outputs[count++];
 		memset(fee_out, 0, sizeof(*fee_out));
 		strncpy(fee_out->address, fee_address, sizeof(fee_out->address) - 1);
@@ -6044,8 +6074,11 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 
 	plan->output_count = count;
 	plan->assigned_sats = assigned;
-	if (plan->assigned_sats != reward_sats)
+	if (plan->assigned_sats != reward_sats) {
+		LOGERR("SOLO SNAP build plan abort: final assignment mismatch group=%s assigned=%" PRIu64 " reward=%" PRIu64,
+			user->group_name, plan->assigned_sats, reward_sats);
 		return false;
+	}
 
 	return true;
 }
