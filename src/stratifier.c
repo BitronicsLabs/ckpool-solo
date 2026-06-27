@@ -6147,10 +6147,14 @@ static void persist_group_snapshot(ckpool_t *ckp, const group_payout_plan_t *pla
 		return;
 
 	ASPRINTF(&fname, "%s/pool/solo-groups-snapshots.jsonl", ckp->logdir);
+	LOGWARNING("SOLO SNAP persist start: path=%s group=%s outputs=%d reward=%" PRIu64,
+		fname, plan->group_name, plan->output_count, reward_sats);
 	fp = fopen(fname, "a");
 	if (likely(fp)) {
-		fputs(serialized, fp);
+		int wrote = fputs(serialized, fp);
+		fflush(fp);
 		fclose(fp);
+		LOGWARNING("SOLO SNAP persist wrote: path=%s result=%d group=%s", fname, wrote, plan->group_name);
 	} else
 		LOGERR("Failed to fopen %s", fname);
 	free(serialized);
@@ -6160,6 +6164,9 @@ static void persist_group_snapshot(ckpool_t *ckp, const group_payout_plan_t *pla
 static void persist_group_snapshot_async(ckpool_t *ckp, group_snapshot_task_t *task)
 {
 	if (likely(task)) {
+		LOGWARNING("SOLO SNAP async start: group=%s height=%d reward=%" PRIu64 " worker=%s",
+			task->plan.group_name, task->height, task->reward_sats,
+			task->workername[0] ? task->workername : "");
 		persist_group_snapshot(ckp, &task->plan,
 			task->solved_by_address[0] ? task->solved_by_address : NULL,
 			task->height,
