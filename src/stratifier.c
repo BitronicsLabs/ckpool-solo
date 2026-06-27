@@ -5889,9 +5889,17 @@ static void snapshot_group_solve(sdata_t *sdata, user_instance_t *user, int heig
 
 	if (!user || !user->group_name[0])
 		return;
-
-	if (!build_group_payout_plan(sdata, user, (uint64_t)sdata->current_workbase->coinbasevalue, &plan))
+	if (!reward_sats) {
+		LOGERR("SOLO SNAP skip: empty reward for group=%s worker=%s", user->group_name, workername ? workername : "");
 		return;
+	}
+
+	if (!build_group_payout_plan(sdata, user, reward_sats, &plan)) {
+		LOGERR("SOLO SNAP plan build failed: group=%s reward_sats=%" PRIu64 " current_coinbase=%" PRIu64,
+			user->group_name, reward_sats,
+			sdata->current_workbase ? (uint64_t)sdata->current_workbase->coinbasevalue : 0);
+		return;
+	}
 
 	task = ckzalloc(sizeof(*task));
 	memcpy(&task->plan, &plan, sizeof(task->plan));
