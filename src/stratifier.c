@@ -1060,7 +1060,7 @@ static void send_workinfo(ckpool_t *ckp, sdata_t *sdata, const workbase_t *wb)
 }
 
 static bool build_group_coinbase_outputs(sdata_t *sdata, user_instance_t *user, uint64_t reward_sats,
-				      uchar **out_bin, int *out_len)
+				      uchar **out_bin, int *out_len, int *out_count)
 {
 	group_payout_plan_t plan;
 	uchar *buf;
@@ -1101,6 +1101,8 @@ static bool build_group_coinbase_outputs(sdata_t *sdata, user_instance_t *user, 
 	}
 	*out_bin = buf;
 	*out_len = offset;
+	if (out_count)
+		*out_count = valid_outputs;
 	return true;
 }
 
@@ -1121,11 +1123,16 @@ static void __generate_userwb(sdata_t *sdata, workbase_t *wb, user_instance_t *u
 	{
 		uchar *group_outputs = NULL;
 		int group_outputs_len = 0;
-		if (user->group_name[0] && build_group_coinbase_outputs(sdata, user, wb->coinbasevalue, &group_outputs, &group_outputs_len)) {
-			LOGWARNING("SOLO group job coinbase enabled: user=%s group=%s outputs_len=%d reward=%" PRIu64, user->username, user->group_name, group_outputs_len, wb->coinbasevalue);
+		int group_output_count = 0;
+		if (user->group_name[0] && build_group_coinbase_outputs(sdata, user, wb->coinbasevalue, &group_outputs, &group_outputs_len, &group_output_count)) {
+			int output_count_offset = 4;
+			int expected_output_count = group_output_count + (wb->insert_witness ? 1 : 0) + ((sdata->ckp->donvalid && sdata->ckp->donation > 0) ? 1 : 0);
+			LOGWARNING("SOLO group job coinbase enabled: user=%s group=%s outputs_len=%d outputs=%d reward=%" PRIu64, user->username, user->group_name, group_outputs_len, group_output_count, wb->coinbasevalue);
 			userwb->coinb2bin = ckalloc(wb->coinb2len + group_outputs_len + wb->coinb3len);
 			memcpy(userwb->coinb2bin, wb->coinb2bin, wb->coinb2len);
 			userwb->coinb2len = wb->coinb2len;
+			if (expected_output_count > 0 && expected_output_count < 0xfd)
+				userwb->coinb2bin[output_count_offset] = (uchar)expected_output_count;
 			memcpy(userwb->coinb2bin + userwb->coinb2len, group_outputs, group_outputs_len);
 			userwb->coinb2len += group_outputs_len;
 			memcpy(userwb->coinb2bin + userwb->coinb2len, wb->coinb3bin, wb->coinb3len);
@@ -5931,25 +5938,7 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 		return false;
 
 	memset(plan, 0, sizeof(*plan));
-	if (!strcmp(user->group_name, "bitronics")) {
-		strncpy(plan->group_name, user->group_name, sizeof(plan->group_name) - 1);
-		plan->hidden = user->group_hidden;
-		plan->total_reward_sats = reward_sats;
-		strncpy(plan->outputs[0].address, "bcrt1qmlghzqvhqatu8hpdl9af8ngg72g7l7t4fnsprv", sizeof(plan->outputs[0].address) - 1);
-		strncpy(plan->outputs[0].worker_label, "worker1", sizeof(plan->outputs[0].worker_label) - 1);
-		plan->outputs[0].accepted_diff_window = 70.0;
-		plan->outputs[0].accepted_shares_window = 70;
-		plan->outputs[0].fee_output = false;
-		strncpy(plan->outputs[1].address, "bcrt1q2k984wqpy52w2pv9lve5cg3pldlwp05y2uja8u", sizeof(plan->outputs[1].address) - 1);
-		strncpy(plan->outputs[1].worker_label, "worker2", sizeof(plan->outputs[1].worker_label) - 1);
-		plan->outputs[1].accepted_diff_window = 30.0;
-		plan->outputs[1].accepted_shares_window = 30;
-		plan->outputs[1].fee_output = false;
-		total = 100.0;
-		count = 2;
-		LOGWARNING("SOLO group lab override active: group=%s split=70/30", user->group_name);
-	} else {
-		mutex_lock(&sdata->group_lock);
+	mutex_lock(&sdata->group_lock);
 		HASH_FIND_STR(sdata->group_contribs, user->group_name, group);
 		if (!group || !group->member_count || group->total_diff_window <= 0) {
 			mutex_unlock(&sdata->group_lock);
@@ -5960,19 +5949,18 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 		plan->hidden = group->hidden;
 		plan->total_reward_sats = reward_sats;
 
-		for (member = group->members; member && count < 50; member = member->hh.next) {
-			if (member->accepted_diff_window <= 0)
-				continue;
-			strncpy(plan->outputs[count].address, member->address, sizeof(plan->outputs[count].address) - 1);
-			strncpy(plan->outputs[count].worker_label, member->worker_label, sizeof(plan->outputs[count].worker_label) - 1);
-			plan->outputs[count].accepted_diff_window = member->accepted_diff_window;
-			plan->outputs[count].accepted_shares_window = member->accepted_shares_window;
-			plan->outputs[count].fee_output = false;
-			total += member->accepted_diff_window;
-			count++;
-		}
-		mutex_unlock(&sdata->group_lock);
+	for (member = group->members; member && count < 50; member = member->hh.next) {
+		if (member->accepted_diff_window <= 0)
+			continue;
+		strncpy(plan->outputs[count].address, member->address, sizeof(plan->outputs[count].address) - 1);
+		strncpy(plan->outputs[count].worker_label, member->worker_label, sizeof(plan->outputs[count].worker_label) - 1);
+		plan->outputs[count].accepted_diff_window = member->accepted_diff_window;
+		plan->outputs[count].accepted_shares_window = member->accepted_shares_window;
+		plan->outputs[count].fee_output = false;
+		total += member->accepted_diff_window;
+		count++;
 	}
+	mutex_unlock(&sdata->group_lock);
 
 	if (!count || total <= 0)
 		return false;
