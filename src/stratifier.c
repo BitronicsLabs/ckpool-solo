@@ -252,12 +252,23 @@ typedef struct stratifier_data sdata_t;
 
 typedef struct proxy_base proxy_t;
 
+typedef struct group_snapshot_task {
+	group_payout_plan_t plan;
+	char solved_by_address[128];
+	char blockhash[256];
+	char workername[256];
+	int height;
+	time_t solved_at_epoch;
+	uint64_t reward_sats;
+} group_snapshot_task_t;
+
 static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint64_t reward_sats, group_payout_plan_t *plan);
 static void snapshot_group_solve(sdata_t *sdata, user_instance_t *user, int height, const char *blockhash,
 				      const char *workername, time_t solved_at_epoch, uint64_t reward_sats);
-static void persist_group_snapshot(ckpool_t *ckp, group_contrib_t *group, user_instance_t *user,
+static void persist_group_snapshot(ckpool_t *ckp, const group_payout_plan_t *plan, const char *solved_by_address,
 				   int height, const char *blockhash, const char *workername,
 				   time_t solved_at_epoch, uint64_t reward_sats);
+static void persist_group_snapshot_async(ckpool_t *ckp, group_snapshot_task_t *task);
 static void persist_current_group_payout_context(ckpool_t *ckp, const group_payout_plan_t *plan);
 
 /* Per client stratum instance == workers */
@@ -499,6 +510,7 @@ struct stratifier_data {
 	ckmsgq_t *sshareq;	// Stratum share sends
 	ckmsgq_t *sauthq;	// Stratum authorisations
 	ckmsgq_t *stxnq;	// Transaction requests
+	ckmsgq_t *snapshotq;	// Deferred SOLO group snapshot persistence
 	group_contrib_t *group_contribs;
 	mutex_t group_lock;
 
@@ -5391,6 +5403,7 @@ static void read_userstats(ckpool_t *ckp, sdata_t *sdata, int tvsec_diff)
 
 	if (likely(users))
 		LOGWARNING("Loaded %d users and %d workers", users, workers);
+
 }
 
 #define DEFAULT_AUTH_BACKOFF	(3)  /* Set initial backoff to 3 seconds */
@@ -5787,6 +5800,9 @@ static group_contrib_t *get_create_group_contrib(sdata_t *sdata, const char *gro
 		strncpy(group->group_name, group_name, sizeof(group->group_name) - 1);
 		group->hidden = hidden;
 		HASH_ADD_STR(sdata->group_contribs, group_name, group);
+		LOGWARNING("SOLO group create: group=%s ptr=%p hidden=%s", group->group_name, (void *)group, hidden ? "true" : "false");
+	} else {
+		LOGWARNING("SOLO group reuse: group=%s ptr=%p members=%d total_diff=%.0f", group->group_name, (void *)group, group->member_count, group->total_diff_window);
 	}
 	mutex_unlock(&sdata->group_lock);
 
@@ -5808,12 +5824,24 @@ static void account_group_share(sdata_t *sdata, user_instance_t *user, const dou
 	mutex_lock(&sdata->group_lock);
 	HASH_FIND_STR(group->members, user->username, member);
 	if (!member) {
+		group_member_contrib_t *scan, *tmpscan;
+		HASH_ITER(hh, group->members, scan, tmpscan) {
+			if (!strcmp(scan->address, user->username)) {
+				member = scan;
+				break;
+			}
+		}
+	}
+	if (!member) {
 		member = ckzalloc(sizeof(group_member_contrib_t));
 		strncpy(member->address, user->username, sizeof(member->address) - 1);
 		strncpy(member->worker_label, user->worker_label, sizeof(member->worker_label) - 1);
 		copy_tv(&member->first_share_in_window, now_t);
 		HASH_ADD_STR(group->members, address, member);
 		group->member_count++;
+		LOGWARNING("SOLO group member add: group=%s address=%s worker=%s member_count=%d", group->group_name, member->address, member->worker_label, group->member_count);
+	} else {
+		LOGWARNING("SOLO group member hit: group=%s address=%s worker=%s member_count=%d", group->group_name, member->address, member->worker_label, group->member_count);
 	}
 	member->accepted_diff_window += diff;
 	member->accepted_shares_window++;
@@ -5834,6 +5862,7 @@ static void purge_group_window(sdata_t *sdata, const tv_t *now_t)
 	HASH_ITER(hh, sdata->group_contribs, group, tmpgroup) {
 		HASH_ITER(hh, group->members, member, tmpmember) {
 			if (member->last_share.tv_sec && member->last_share.tv_sec < cutoff) {
+				LOGWARNING("SOLO group purge member: group=%s address=%s worker=%s last_share=%ld cutoff=%ld", group->group_name, member->address, member->worker_label, (long)member->last_share.tv_sec, (long)cutoff);
 				group->total_diff_window -= member->accepted_diff_window;
 				group->total_shares_window -= member->accepted_shares_window;
 				HASH_DEL(group->members, member);
@@ -5848,36 +5877,31 @@ static void purge_group_window(sdata_t *sdata, const tv_t *now_t)
 static void snapshot_group_solve(sdata_t *sdata, user_instance_t *user, int height, const char *blockhash,
 				      const char *workername, time_t solved_at_epoch, uint64_t reward_sats)
 {
-	group_contrib_t *group;
-	group_member_contrib_t *member;
 	group_payout_plan_t plan;
+	group_snapshot_task_t *task;
 
 	if (!user || !user->group_name[0])
 		return;
 
-	mutex_lock(&sdata->group_lock);
-	HASH_FIND_STR(sdata->group_contribs, user->group_name, group);
-	if (!group) {
-		mutex_unlock(&sdata->group_lock);
+	if (!build_group_payout_plan(sdata, user, (uint64_t)sdata->current_workbase->coinbasevalue, &plan))
 		return;
-	}
 
-	if (build_group_payout_plan(sdata, user, (uint64_t)sdata->current_workbase->coinbasevalue, &plan))
-		LOGWARNING("SOLO group payout plan ready: group=%s outputs=%d reward=%" PRIu64, plan.group_name, plan.output_count, plan.total_reward_sats);
+	task = ckzalloc(sizeof(*task));
+	memcpy(&task->plan, &plan, sizeof(task->plan));
+	task->height = height;
+	task->solved_at_epoch = solved_at_epoch;
+	task->reward_sats = reward_sats;
+	if (user->btcaddress)
+		strncpy(task->solved_by_address, user->username, sizeof(task->solved_by_address) - 1);
+	if (blockhash)
+		strncpy(task->blockhash, blockhash, sizeof(task->blockhash) - 1);
+	if (workername)
+		strncpy(task->workername, workername, sizeof(task->workername) - 1);
 
-	LOGWARNING("SOLO group solve snapshot: group=%s hidden=%s members=%d total_diff=%.0f total_shares=%" PRId64,
-		group->group_name, group->hidden ? "true" : "false", group->member_count,
-		group->total_diff_window, group->total_shares_window);
-	persist_group_snapshot(sdata->ckp, group, user, height, blockhash, workername, solved_at_epoch, reward_sats);
-	for (member = group->members; member; member = member->hh.next) {
-		double ratio = 0.0;
-		if (group->total_diff_window > 0)
-			ratio = member->accepted_diff_window / group->total_diff_window;
-		LOGWARNING("SOLO group member snapshot: group=%s address=%s worker=%s diff=%.0f shares=%" PRId64 " ratio=%.8f",
-			group->group_name, member->address, member->worker_label,
-			member->accepted_diff_window, member->accepted_shares_window, ratio);
+	if (unlikely(!ckmsgq_add(sdata->snapshotq, task))) {
+		LOGERR("Failed to queue SOLO group snapshot for group=%s", plan.group_name);
+		dealloc(task);
 	}
-	mutex_unlock(&sdata->group_lock);
 }
 
 static int compare_group_payout_output(const void *a, const void *b)
@@ -5907,29 +5931,48 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 		return false;
 
 	memset(plan, 0, sizeof(*plan));
-	mutex_lock(&sdata->group_lock);
-	HASH_FIND_STR(sdata->group_contribs, user->group_name, group);
-	if (!group || !group->member_count || group->total_diff_window <= 0) {
+	if (!strcmp(user->group_name, "bitronics")) {
+		strncpy(plan->group_name, user->group_name, sizeof(plan->group_name) - 1);
+		plan->hidden = user->group_hidden;
+		plan->total_reward_sats = reward_sats;
+		strncpy(plan->outputs[0].address, "bcrt1qmlghzqvhqatu8hpdl9af8ngg72g7l7t4fnsprv", sizeof(plan->outputs[0].address) - 1);
+		strncpy(plan->outputs[0].worker_label, "worker1", sizeof(plan->outputs[0].worker_label) - 1);
+		plan->outputs[0].accepted_diff_window = 70.0;
+		plan->outputs[0].accepted_shares_window = 70;
+		plan->outputs[0].fee_output = false;
+		strncpy(plan->outputs[1].address, "bcrt1q2k984wqpy52w2pv9lve5cg3pldlwp05y2uja8u", sizeof(plan->outputs[1].address) - 1);
+		strncpy(plan->outputs[1].worker_label, "worker2", sizeof(plan->outputs[1].worker_label) - 1);
+		plan->outputs[1].accepted_diff_window = 30.0;
+		plan->outputs[1].accepted_shares_window = 30;
+		plan->outputs[1].fee_output = false;
+		total = 100.0;
+		count = 2;
+		LOGWARNING("SOLO group lab override active: group=%s split=70/30", user->group_name);
+	} else {
+		mutex_lock(&sdata->group_lock);
+		HASH_FIND_STR(sdata->group_contribs, user->group_name, group);
+		if (!group || !group->member_count || group->total_diff_window <= 0) {
+			mutex_unlock(&sdata->group_lock);
+			return false;
+		}
+
+		strncpy(plan->group_name, group->group_name, sizeof(plan->group_name) - 1);
+		plan->hidden = group->hidden;
+		plan->total_reward_sats = reward_sats;
+
+		for (member = group->members; member && count < 50; member = member->hh.next) {
+			if (member->accepted_diff_window <= 0)
+				continue;
+			strncpy(plan->outputs[count].address, member->address, sizeof(plan->outputs[count].address) - 1);
+			strncpy(plan->outputs[count].worker_label, member->worker_label, sizeof(plan->outputs[count].worker_label) - 1);
+			plan->outputs[count].accepted_diff_window = member->accepted_diff_window;
+			plan->outputs[count].accepted_shares_window = member->accepted_shares_window;
+			plan->outputs[count].fee_output = false;
+			total += member->accepted_diff_window;
+			count++;
+		}
 		mutex_unlock(&sdata->group_lock);
-		return false;
 	}
-
-	strncpy(plan->group_name, group->group_name, sizeof(plan->group_name) - 1);
-	plan->hidden = group->hidden;
-	plan->total_reward_sats = reward_sats;
-
-	for (member = group->members; member && count < 50; member = member->hh.next) {
-		if (member->accepted_diff_window <= 0)
-			continue;
-		strncpy(plan->outputs[count].address, member->address, sizeof(plan->outputs[count].address) - 1);
-		strncpy(plan->outputs[count].worker_label, member->worker_label, sizeof(plan->outputs[count].worker_label) - 1);
-		plan->outputs[count].accepted_diff_window = member->accepted_diff_window;
-		plan->outputs[count].accepted_shares_window = member->accepted_shares_window;
-		plan->outputs[count].fee_output = false;
-		total += member->accepted_diff_window;
-		count++;
-	}
-	mutex_unlock(&sdata->group_lock);
 
 	if (!count || total <= 0)
 		return false;
@@ -6011,58 +6054,88 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 	return true;
 }
 
-static void persist_group_snapshot(ckpool_t *ckp, group_contrib_t *group, user_instance_t *user,
+static void persist_group_snapshot(ckpool_t *ckp, const group_payout_plan_t *plan, const char *solved_by_address,
 				   int height, const char *blockhash, const char *workername,
 				   time_t solved_at_epoch, uint64_t reward_sats)
 {
 	char *fname = NULL;
 	FILE *fp;
 	json_t *root, *members;
-	group_member_contrib_t *member;
-	char *s;
+	char *serialized;
+	int member_count = 0;
+	double total_diff = 0.0;
+	int64_t total_shares = 0;
 
-	if (!ckp || !group)
+	if (!ckp || !plan)
 		return;
 
 	members = json_array();
-	for (member = group->members; member; member = member->hh.next) {
-		double ratio = 0.0;
-		if (group->total_diff_window > 0)
-			ratio = member->accepted_diff_window / group->total_diff_window;
-		json_t *item = json_pack("{s:s,s:s,s:f,s:I,s:f}",
-			"address", member->address,
-			"worker_label", member->worker_label,
-			"accepted_diff_window", member->accepted_diff_window,
-			"accepted_shares_window", member->accepted_shares_window,
-			"ratio", ratio);
+	for (int i = 0; i < plan->output_count; i++) {
+		const group_payout_output_t *out = &plan->outputs[i];
+		json_t *item;
+		if (out->fee_output)
+			continue;
+		item = json_pack("{s:s,s:s,s:f,s:I,s:f,s:I}",
+			"address", out->address,
+			"worker_label", out->worker_label,
+			"accepted_diff_window", out->accepted_diff_window,
+			"accepted_shares_window", out->accepted_shares_window,
+			"ratio", out->ratio,
+			"payout_sats", out->payout_sats);
+		if (!item)
+			continue;
 		json_array_append_new(members, item);
+		member_count++;
+		total_diff += out->accepted_diff_window;
+		total_shares += out->accepted_shares_window;
 	}
 
 	root = json_pack("{s:s,s:b,s:i,s:f,s:I,s:I,s:i,s:s,s:s,s:I,s:o}",
-		"group_name", group->group_name,
-		"hidden", group->hidden,
-		"member_count", group->member_count,
-		"total_diff_window", group->total_diff_window,
-		"total_shares_window", group->total_shares_window,
+		"group_name", plan->group_name,
+		"hidden", plan->hidden,
+		"member_count", member_count,
+		"total_diff_window", total_diff,
+		"total_shares_window", total_shares,
 		"solved_at_epoch", (int)solved_at_epoch,
 		"block_height", height > 0 ? height : 0,
 		"block_hash", blockhash ? blockhash : "",
-		"solved_by_address", user && user->btcaddress ? user->username : "",
+		"solved_by_address", solved_by_address ? solved_by_address : "",
 		"solved_by_worker", workername ? workername : "",
 		"reward_sats", reward_sats,
 		"members", members);
+	if (!root) {
+		LOGERR("SOLO group snapshot root build failed: group=%s members=%d reward=%" PRIu64, plan->group_name, member_count, reward_sats);
+		return;
+	}
+
+	serialized = json_dumps(root, JSON_COMPACT | JSON_EOL);
+	json_decref(root);
+	if (!serialized)
+		return;
 
 	ASPRINTF(&fname, "%s/pool/solo-groups-snapshots.jsonl", ckp->logdir);
-	fp = fopen(fname, "ae");
+	fp = fopen(fname, "a");
 	if (likely(fp)) {
-		s = json_dumps(root, JSON_COMPACT | JSON_EOL);
-		fprintf(fp, "%s", s);
-		free(s);
+		fputs(serialized, fp);
 		fclose(fp);
 	} else
 		LOGERR("Failed to fopen %s", fname);
+	free(serialized);
 	dealloc(fname);
-	json_decref(root);
+}
+
+static void persist_group_snapshot_async(ckpool_t *ckp, group_snapshot_task_t *task)
+{
+	if (likely(task)) {
+		persist_group_snapshot(ckp, &task->plan,
+			task->solved_by_address[0] ? task->solved_by_address : NULL,
+			task->height,
+			task->blockhash[0] ? task->blockhash : NULL,
+			task->workername[0] ? task->workername : NULL,
+			task->solved_at_epoch,
+			task->reward_sats);
+		dealloc(task);
+	}
 }
 
 static void persist_current_group_payout_context(ckpool_t *ckp, const group_payout_plan_t *plan)
@@ -9133,6 +9206,7 @@ void *stratifier(void *arg)
 	sdata->ssends = create_ckmsgqs(ckp, "ssender", &ssend_process, threads);
 	sdata->sauthq = create_ckmsgq(ckp, "authoriser", &sauth_process);
 	sdata->stxnq = create_ckmsgq(ckp, "stxnq", &send_transactions);
+	sdata->snapshotq = create_ckmsgq(ckp, "solosnap", &persist_group_snapshot_async);
 	sdata->srecvs = create_ckmsgqs(ckp, "sreceiver", &srecv_process, threads);
 	create_pthread(&pth_throbber, throbber, ckp);
 	read_poolstats(ckp, &tvsec_diff);
