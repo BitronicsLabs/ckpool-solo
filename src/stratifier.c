@@ -263,6 +263,7 @@ typedef struct group_snapshot_task {
 } group_snapshot_task_t;
 
 static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint64_t reward_sats, group_payout_plan_t *plan);
+static bool load_current_group_payout_context(ckpool_t *ckp, const char *group_name, group_payout_plan_t *plan);
 static void snapshot_group_solve(sdata_t *sdata, user_instance_t *user, int height, const char *blockhash,
 				      const char *workername, time_t solved_at_epoch, uint64_t reward_sats);
 static void persist_group_snapshot(ckpool_t *ckp, const group_payout_plan_t *plan, const char *solved_by_address,
@@ -5898,7 +5899,10 @@ static void snapshot_group_solve(sdata_t *sdata, user_instance_t *user, int heig
 		LOGERR("SOLO SNAP plan build failed: group=%s reward_sats=%" PRIu64 " current_coinbase=%" PRIu64,
 			user->group_name, reward_sats,
 			sdata->current_workbase ? (uint64_t)sdata->current_workbase->coinbasevalue : 0);
-		return;
+		if (!load_current_group_payout_context(sdata->ckp, user->group_name, &plan))
+			return;
+		LOGWARNING("SOLO SNAP fallback to persisted payout context: group=%s outputs=%d reward=%" PRIu64,
+			plan.group_name, plan.output_count, plan.total_reward_sats);
 	}
 
 	task = ckzalloc(sizeof(*task));
@@ -6165,6 +6169,64 @@ static void persist_group_snapshot_async(ckpool_t *ckp, group_snapshot_task_t *t
 			task->reward_sats);
 		dealloc(task);
 	}
+}
+
+static bool load_current_group_payout_context(ckpool_t *ckp, const char *group_name, group_payout_plan_t *plan)
+{
+	char *fname = NULL;
+	json_error_t err;
+	json_t *root = NULL, *entry = NULL, *outputs = NULL, *item = NULL;
+	size_t idx;
+
+	if (!ckp || !group_name || !group_name[0] || !plan)
+		return false;
+
+	memset(plan, 0, sizeof(*plan));
+	ASPRINTF(&fname, "%s/pool/current-group-payout-contexts.json", ckp->logdir);
+	root = json_load_file(fname, 0, &err);
+	dealloc(fname);
+	if (!root || !json_is_object(root)) {
+		if (root)
+			json_decref(root);
+		return false;
+	}
+	entry = json_object_get(root, group_name);
+	if (!entry || !json_is_object(entry)) {
+		json_decref(root);
+		return false;
+	}
+
+	strncpy(plan->group_name, json_string_value(json_object_get(entry, "group_name")) ?: group_name, sizeof(plan->group_name) - 1);
+	plan->hidden = json_is_true(json_object_get(entry, "hidden"));
+	plan->total_reward_sats = (uint64_t)json_integer_value(json_object_get(entry, "total_reward_sats"));
+	plan->assigned_sats = (uint64_t)json_integer_value(json_object_get(entry, "assigned_sats"));
+	outputs = json_object_get(entry, "outputs");
+	if (!json_is_array(outputs)) {
+		json_decref(root);
+		return false;
+	}
+
+	json_array_foreach(outputs, idx, item) {
+		group_payout_output_t *out;
+		const char *address;
+		const char *worker_label;
+		if (plan->output_count >= 51 || !json_is_object(item))
+			break;
+		out = &plan->outputs[plan->output_count++];
+		address = json_string_value(json_object_get(item, "address"));
+		worker_label = json_string_value(json_object_get(item, "worker_label"));
+		if (address)
+			strncpy(out->address, address, sizeof(out->address) - 1);
+		if (worker_label)
+			strncpy(out->worker_label, worker_label, sizeof(out->worker_label) - 1);
+		out->ratio = json_number_value(json_object_get(item, "ratio"));
+		out->accepted_diff_window = json_number_value(json_object_get(item, "accepted_diff_window"));
+		out->accepted_shares_window = json_integer_value(json_object_get(item, "accepted_shares_window"));
+		out->payout_sats = (uint64_t)json_integer_value(json_object_get(item, "payout_sats"));
+		out->fee_output = json_is_true(json_object_get(item, "fee_output"));
+	}
+	json_decref(root);
+	return plan->output_count > 0;
 }
 
 static void persist_current_group_payout_context(ckpool_t *ckp, const group_payout_plan_t *plan)
