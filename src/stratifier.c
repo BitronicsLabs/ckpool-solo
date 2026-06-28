@@ -6163,19 +6163,25 @@ static void persist_group_snapshot(ckpool_t *ckp, const group_payout_plan_t *pla
 
 static void persist_group_snapshot_async(ckpool_t *ckp, group_snapshot_task_t *task)
 {
-	if (likely(task)) {
-		LOGWARNING("SOLO SNAP async start: group=%s height=%d reward=%" PRIu64 " worker=%s",
-			task->plan.group_name, task->height, task->reward_sats,
-			task->workername[0] ? task->workername : "");
-		persist_group_snapshot(ckp, &task->plan,
-			task->solved_by_address[0] ? task->solved_by_address : NULL,
-			task->height,
-			task->blockhash[0] ? task->blockhash : NULL,
-			task->workername[0] ? task->workername : NULL,
-			task->solved_at_epoch,
-			task->reward_sats);
-		dealloc(task);
-	}
+	const char *solved_by_address;
+	const char *blockhash;
+	const char *workername;
+	if (unlikely(!task))
+		return;
+	LOGWARNING("SOLO SNAP async start: group=%s height=%d reward=%" PRIu64 " worker=%s",
+		task->plan.group_name, task->height, task->reward_sats,
+		task->workername[0] ? task->workername : "");
+	solved_by_address = task->solved_by_address[0] ? task->solved_by_address : NULL;
+	blockhash = task->blockhash[0] ? task->blockhash : NULL;
+	workername = task->workername[0] ? task->workername : NULL;
+	LOGWARNING("SOLO SNAP async before persist: group=%s solved_by=%s blockhash=%s",
+		task->plan.group_name,
+		solved_by_address ? solved_by_address : "",
+		blockhash ? blockhash : "");
+	persist_group_snapshot(ckp, &task->plan, solved_by_address, task->height,
+		blockhash, workername, task->solved_at_epoch, task->reward_sats);
+	LOGWARNING("SOLO SNAP async after persist: group=%s height=%d", task->plan.group_name, task->height);
+	dealloc(task);
 }
 
 static bool load_current_group_payout_context(ckpool_t *ckp, const char *group_name, group_payout_plan_t *plan)
