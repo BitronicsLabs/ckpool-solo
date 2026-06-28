@@ -6093,28 +6093,45 @@ static void persist_group_snapshot(ckpool_t *ckp, const group_payout_plan_t *pla
 {
 	char *fname = NULL;
 	FILE *fp;
-	json_t *root;
+	json_t *root, *members;
 	char *serialized;
+	int member_count = 0;
+	double total_diff = 0.0;
+	int64_t total_shares = 0;
 
 	if (!ckp || !plan)
 		return;
 
-	root = json_pack("{s:s,s:i,s:I,s:s,s:s,s:s,s:i}",
+	members = json_array();
+	for (int i = 0; i < plan->output_count; i++) {
+		const group_payout_output_t *out = &plan->outputs[i];
+		if (out->fee_output)
+			continue;
+		member_count++;
+		total_diff += out->accepted_diff_window;
+		total_shares += out->accepted_shares_window;
+	}
+
+	root = json_pack("{s:s,s:i,s:I,s:s,s:s,s:s,s:i,s:i,s:f,s:I,s:o}",
 		"group_name", plan->group_name,
 		"block_height", height > 0 ? height : 0,
 		"reward_sats", reward_sats,
 		"solved_by_address", solved_by_address ? solved_by_address : "",
 		"solved_by_worker", workername ? workername : "",
 		"block_hash", blockhash ? blockhash : "",
-		"solved_at_epoch", (int)solved_at_epoch);
+		"solved_at_epoch", (int)solved_at_epoch,
+		"member_count", member_count,
+		"total_diff_window", total_diff,
+		"total_shares_window", total_shares,
+		"members", members);
 	if (!root) {
-		LOGERR("SOLO SNAP json stage1 root build failed: group=%s", plan->group_name);
+		LOGERR("SOLO SNAP json stage2 root build failed: group=%s", plan->group_name);
 		return;
 	}
 	serialized = json_dumps(root, JSON_COMPACT | JSON_EOL);
 	json_decref(root);
 	if (!serialized) {
-		LOGERR("SOLO SNAP json stage1 dumps failed: group=%s", plan->group_name);
+		LOGERR("SOLO SNAP json stage2 dumps failed: group=%s", plan->group_name);
 		return;
 	}
 
