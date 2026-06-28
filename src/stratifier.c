@@ -6093,57 +6093,8 @@ static void persist_group_snapshot(ckpool_t *ckp, const group_payout_plan_t *pla
 {
 	char *fname = NULL;
 	FILE *fp;
-	json_t *root, *members;
-	char *serialized;
-	int member_count = 0;
-	double total_diff = 0.0;
-	int64_t total_shares = 0;
 
 	if (!ckp || !plan)
-		return;
-
-	members = json_array();
-	for (int i = 0; i < plan->output_count; i++) {
-		const group_payout_output_t *out = &plan->outputs[i];
-		json_t *item;
-		if (out->fee_output)
-			continue;
-		item = json_pack("{s:s,s:s,s:f,s:I,s:f,s:I}",
-			"address", out->address,
-			"worker_label", out->worker_label,
-			"accepted_diff_window", out->accepted_diff_window,
-			"accepted_shares_window", out->accepted_shares_window,
-			"ratio", out->ratio,
-			"payout_sats", out->payout_sats);
-		if (!item)
-			continue;
-		json_array_append_new(members, item);
-		member_count++;
-		total_diff += out->accepted_diff_window;
-		total_shares += out->accepted_shares_window;
-	}
-
-	root = json_pack("{s:s,s:b,s:i,s:f,s:I,s:I,s:i,s:s,s:s,s:I,s:o}",
-		"group_name", plan->group_name,
-		"hidden", plan->hidden,
-		"member_count", member_count,
-		"total_diff_window", total_diff,
-		"total_shares_window", total_shares,
-		"solved_at_epoch", (int)solved_at_epoch,
-		"block_height", height > 0 ? height : 0,
-		"block_hash", blockhash ? blockhash : "",
-		"solved_by_address", solved_by_address ? solved_by_address : "",
-		"solved_by_worker", workername ? workername : "",
-		"reward_sats", reward_sats,
-		"members", members);
-	if (!root) {
-		LOGERR("SOLO group snapshot root build failed: group=%s members=%d reward=%" PRIu64, plan->group_name, member_count, reward_sats);
-		return;
-	}
-
-	serialized = json_dumps(root, JSON_COMPACT | JSON_EOL);
-	json_decref(root);
-	if (!serialized)
 		return;
 
 	ASPRINTF(&fname, "%s/pool/solo-groups-snapshots.jsonl", ckp->logdir);
@@ -6151,13 +6102,20 @@ static void persist_group_snapshot(ckpool_t *ckp, const group_payout_plan_t *pla
 		fname, plan->group_name, plan->output_count, reward_sats);
 	fp = fopen(fname, "a");
 	if (likely(fp)) {
-		int wrote = fputs(serialized, fp);
+		int wrote = fprintf(fp,
+			"plain|group=%s|height=%d|reward=%" PRIu64 "|who=%s|worker=%s|hash=%s|when=%ld\n",
+			plan->group_name,
+			height,
+			reward_sats,
+			solved_by_address ? solved_by_address : "",
+			workername ? workername : "",
+			blockhash ? blockhash : "",
+			(long)solved_at_epoch);
 		fflush(fp);
 		fclose(fp);
 		LOGWARNING("SOLO SNAP persist wrote: path=%s result=%d group=%s", fname, wrote, plan->group_name);
 	} else
 		LOGERR("Failed to fopen %s", fname);
-	free(serialized);
 	dealloc(fname);
 }
 
