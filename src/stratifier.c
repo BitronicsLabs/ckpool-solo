@@ -6117,7 +6117,7 @@ static void persist_group_snapshot(ckpool_t *ckp, const group_payout_plan_t *pla
 			"accepted_diff_window", out->accepted_diff_window,
 			"accepted_shares_window", out->accepted_shares_window,
 			"ratio", out->ratio,
-			"payout_sats", out->amount_sats);
+			"payout_sats", out->payout_sats);
 		if (!member || json_array_append_new(members, member) != 0) {
 			if (member)
 				json_decref(member);
