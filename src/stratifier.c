@@ -5526,8 +5526,11 @@ static void parse_group_worker_identity(const char *workername, char *base_usern
 		strncpy(base_username, userpart, base_sz - 1);
 		base_username[base_sz - 1] = '\0';
 	}
-	if (!workerpart || !*workerpart)
-		return;
+	if (!workerpart || !*workerpart) {
+		workerpart = userpart;
+		if (!workerpart || !*workerpart)
+			return;
+	}
 	hash = strchr(workerpart, '#');
 	if (hash) {
 		*hash++ = '\0';
@@ -5541,7 +5544,7 @@ static void parse_group_worker_identity(const char *workername, char *base_usern
 			}
 		}
 	}
-	if (worker_label && worker_sz) {
+	if (worker_label && worker_sz && workerpart != userpart) {
 		strncpy(worker_label, workerpart, worker_sz - 1);
 		worker_label[worker_sz - 1] = '\0';
 	}
