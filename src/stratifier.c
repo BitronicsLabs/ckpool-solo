@@ -1126,12 +1126,13 @@ static void __generate_userwb(sdata_t *sdata, workbase_t *wb, user_instance_t *u
 		int group_outputs_len = 0;
 		int group_output_count = 0;
 		if (user->group_name[0] && build_group_coinbase_outputs(sdata, user, wb->coinbasevalue, &group_outputs, &group_outputs_len, &group_output_count)) {
-			int output_count_offset = 4;
 			int expected_output_count = group_output_count + (wb->insert_witness ? 1 : 0) + ((sdata->ckp->donvalid && sdata->ckp->donation > 0) ? 1 : 0);
+			const int output_count_offset = 4;
+			const int first_output_value_offset = output_count_offset + 1;
 			LOGWARNING("SOLO group job coinbase enabled: user=%s group=%s outputs_len=%d outputs=%d reward=%" PRIu64, user->username, user->group_name, group_outputs_len, group_output_count, wb->coinbasevalue);
-			userwb->coinb2bin = ckalloc(wb->coinb2len + group_outputs_len + wb->coinb3len);
-			memcpy(userwb->coinb2bin, wb->coinb2bin, wb->coinb2len);
-			userwb->coinb2len = wb->coinb2len;
+			userwb->coinb2bin = ckalloc(first_output_value_offset + group_outputs_len + wb->coinb3len);
+			memcpy(userwb->coinb2bin, wb->coinb2bin, first_output_value_offset);
+			userwb->coinb2len = first_output_value_offset;
 			if (expected_output_count > 0 && expected_output_count < 0xfd)
 				userwb->coinb2bin[output_count_offset] = (uchar)expected_output_count;
 			memcpy(userwb->coinb2bin + userwb->coinb2len, group_outputs, group_outputs_len);
