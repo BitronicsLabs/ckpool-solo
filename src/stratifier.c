@@ -5533,6 +5533,16 @@ static void parse_group_worker_identity(const char *workername, char *base_usern
 		strncpy(base_username, userpart, base_sz - 1);
 		base_username[base_sz - 1] = '\0';
 	}
+	/* A wallet#group identity with no .worker leaves the #group suffix on
+	 * base_username (it is copied above before the '#' is split off below).
+	 * Strip it so the bare address still passes validateaddress; otherwise
+	 * the member is treated as non-btcaddress and dropped from group
+	 * payouts and per-user coinbases. */
+	if (base_username && base_sz) {
+		char *bhash = strchr(base_username, '#');
+		if (bhash)
+			*bhash = '\0';
+	}
 	if (!workerpart || !*workerpart) {
 		workerpart = userpart;
 		if (!workerpart || !*workerpart)
