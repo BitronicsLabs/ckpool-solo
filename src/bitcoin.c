@@ -315,23 +315,48 @@ out:
 
 bool submit_block(connsock_t *cs, const char *params)
 {
-	json_t *val, *res_val;
+	json_t *val, *res_val, *err_val, *code_val, *msg_val;
 	int len, retries = 0;
-	const char *res_ret;
+	const char *res_ret, *err_msg;
 	bool ret = false;
 	char *rpc_req;
+	size_t params_len;
+	char prefix[65] = {}, suffix[65] = {};
+	long long err_code;
 
-	len = strlen(params) + 64;
+	params_len = strlen(params);
+	len = params_len + 64;
+	if (params_len) {
+		snprintf(prefix, sizeof(prefix), "%.*s", 64, params);
+		if (params_len > 64)
+			snprintf(suffix, sizeof(suffix), "%s", params + params_len - 64);
+		else
+			snprintf(suffix, sizeof(suffix), "%s", params);
+	}
 retry:
 	rpc_req = ckalloc(len);
 	sprintf(rpc_req, "{\"method\": \"submitblock\", \"params\": [\"%s\"]}\n", params);
+	LOGWARNING("submitblock attempt=%d hex_len=%zu prefix=%s suffix=%s", retries + 1, params_len, prefix, suffix);
 	val = json_rpc_call(cs, rpc_req);
 	dealloc(rpc_req);
 	if (!val) {
-		LOGWARNING("%s:%s Failed to get valid json response to submitblock", cs->url, cs->port);
+		LOGWARNING("%s:%s Failed to get valid json response to submitblock (hex_len=%zu prefix=%s suffix=%s)", cs->url, cs->port, params_len, prefix, suffix);
 		if (++retries < 5)
 			goto retry;
 		return ret;
+	}
+	err_val = json_object_get(val, "error");
+	if (err_val && !json_is_null(err_val)) {
+		err_code = 0;
+		err_msg = NULL;
+		code_val = json_object_get(err_val, "code");
+		msg_val = json_object_get(err_val, "message");
+		if (code_val && json_is_integer(code_val))
+			err_code = json_integer_value(code_val);
+		if (msg_val && json_is_string(msg_val))
+			err_msg = json_string_value(msg_val);
+		LOGWARNING("submitblock RPC error code=%lld message=%s", err_code, err_msg ? err_msg : "(null)");
+		goto out;
 	}
 	res_val = json_object_get(val, "result");
 	if (!res_val) {
