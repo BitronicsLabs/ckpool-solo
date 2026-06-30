@@ -5533,6 +5533,16 @@ static void parse_group_worker_identity(const char *workername, char *base_usern
 		strncpy(base_username, userpart, base_sz - 1);
 		base_username[base_sz - 1] = '\0';
 	}
+	/* A wallet#group identity with no .worker leaves the #group suffix on
+	 * base_username (it is copied above before the '#' is split off below).
+	 * Strip it so the bare address still passes validateaddress; otherwise
+	 * the member is treated as non-btcaddress and dropped from group
+	 * payouts and per-user coinbases. */
+	if (base_username && base_sz) {
+		char *bhash = strchr(base_username, '#');
+		if (bhash)
+			*bhash = '\0';
+	}
 	if (!workerpart || !*workerpart) {
 		workerpart = userpart;
 		if (!workerpart || !*workerpart)
@@ -6266,8 +6276,11 @@ static void persist_current_group_payout_context(ckpool_t *ckp, const group_payo
 	}
 
 	outputs = json_array();
+	int member_count = 0;
 	for (int i = 0; i < plan->output_count; i++) {
 		const group_payout_output_t *out = &plan->outputs[i];
+		if (!out->fee_output)
+			member_count++;
 		json_t *item = json_pack("{s:s,s:s,s:f,s:f,s:I,s:I,s:b}",
 			"address", out->address,
 			"worker_label", out->worker_label,
@@ -6285,7 +6298,7 @@ static void persist_current_group_payout_context(ckpool_t *ckp, const group_payo
 		"output_count", plan->output_count,
 		"total_reward_sats", plan->total_reward_sats,
 		"assigned_sats", plan->assigned_sats,
-		"member_count", plan->output_count,
+		"member_count", member_count,
 		"updated_at_epoch", (json_int_t)time(NULL),
 		"outputs", outputs);
 	json_object_set_new(root, plan->group_name, entry);
