@@ -1071,6 +1071,23 @@ static bool build_group_coinbase_outputs(sdata_t *sdata, user_instance_t *user, 
 		return false;
 	persist_current_group_payout_context(sdata->ckp, &plan);
 
+	/* If this user isn't one of the paid members of the plan (e.g. they joined
+	 * a group that is already at the 50-member cap), don't build a group
+	 * coinbase for them. Returning false makes __generate_userwb fall back to
+	 * the normal solo coinbase paying this user's own address, so an over-cap
+	 * miner mines solo instead of an unpaid slot in a group they aren't in. */
+	bool user_in_plan = false;
+	for (int i = 0; i < plan.output_count; i++) {
+		if (!plan.outputs[i].fee_output && !strcmp(plan.outputs[i].address, user->username)) {
+			user_in_plan = true;
+			break;
+		}
+	}
+	if (!user_in_plan) {
+		LOGWARNING("SOLO group at capacity: user=%s not in paid set of group=%s, mining solo", user->username, plan.group_name);
+		return false;
+	}
+
 	int valid_outputs = 0;
 
 	buf = ckzalloc(2048);
