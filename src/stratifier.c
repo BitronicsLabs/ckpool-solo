@@ -168,6 +168,11 @@ typedef struct group_payout_plan {
 
 #define SOLO_GROUP_MIN_OUTPUT_SATS 1000
 #define SOLO_GROUP_MIN_VALID_OUTPUTS 1
+/* Hard cap on paying members of a SOLO group. The group coinbase carries at
+ * most SOLO_GROUP_MAX_MEMBERS member outputs + 1 fee output (outputs[51]).
+ * Enforced when enrolling members so the roster is a stable "first N to join"
+ * set that matches the DB census; addresses beyond the cap mine solo. */
+#define SOLO_GROUP_MAX_MEMBERS 50
 
 
 struct user_instance {
@@ -5878,6 +5883,16 @@ static void account_group_share(sdata_t *sdata, user_instance_t *user, const dou
 		}
 	}
 	if (!member) {
+		if (group->member_count >= SOLO_GROUP_MAX_MEMBERS) {
+			/* Group is full. Don't enrol this address and don't count its
+			 * shares toward the group window: it isn't a member, so
+			 * build_group_coinbase_outputs() falls it back to a solo coinbase
+			 * paying its own address. Keeps the roster a stable, capped set
+			 * that matches the DB census instead of an unbounded hash that the
+			 * payout plan then samples arbitrarily. */
+			mutex_unlock(&sdata->group_lock);
+			return;
+		}
 		member = ckzalloc(sizeof(group_member_contrib_t));
 		strncpy(member->address, user->username, sizeof(member->address) - 1);
 		strncpy(member->worker_label, user->worker_label, sizeof(member->worker_label) - 1);
@@ -6007,7 +6022,7 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 		plan->hidden = group->hidden;
 		plan->total_reward_sats = reward_sats;
 
-	for (member = group->members; member && count < 50; member = member->hh.next) {
+	for (member = group->members; member && count < SOLO_GROUP_MAX_MEMBERS; member = member->hh.next) {
 		if (member->accepted_diff_window <= 0)
 			continue;
 		strncpy(plan->outputs[count].address, member->address, sizeof(plan->outputs[count].address) - 1);
@@ -6098,7 +6113,7 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 
 	if (fee_sats > 0) {
 		group_payout_output_t *fee_out;
-		if (count >= 51) {
+		if (count > SOLO_GROUP_MAX_MEMBERS) {
 			LOGERR("SOLO SNAP build plan abort: too many outputs group=%s count=%d",
 				user->group_name, count);
 			return false;
