@@ -6378,7 +6378,14 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double d
 		return;
 
 	tv_time(&now_t);
-	purge_group_window(sdata, &now_t);
+	/* Group contribution state is pool-wide and lives on the master sdata
+	 * (ckp->sdata), which is also what __generate_userwb() and
+	 * snapshot_group_solve() use. In node/proxy modes client->sdata is a
+	 * per-connection copy, so accounting/purging groups on `sdata` here would
+	 * fragment the roster across sdata instances and the payout plan built
+	 * from ckp->sdata would see an empty or partial group. Always use
+	 * ckp_sdata for group_contribs. */
+	purge_group_window(ckp_sdata, &now_t);
 
 	ck_rlock(&sdata->workbase_lock);
 	next_blockid = sdata->workbase_id;
@@ -6404,7 +6411,7 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double d
 	copy_tv(&user->last_share, &now_t);
 	client->idle = false;
 	if (valid)
-		account_group_share(sdata, user, diff, &now_t);
+		account_group_share(ckp_sdata, user, diff, &now_t);
 
 	/* Once we've updated user/client statistics in node mode, we can't
 	 * alter diff ourselves. */
