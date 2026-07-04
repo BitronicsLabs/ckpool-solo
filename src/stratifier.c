@@ -1095,7 +1095,12 @@ static bool build_group_coinbase_outputs(sdata_t *sdata, user_instance_t *user, 
 
 	int valid_outputs = 0;
 
-	buf = ckzalloc(2048);
+	/* Size for the worst case: each output serialises to 8 (value) + 1 (script
+	 * length) + up to 40 bytes of scriptPubKey, over at most plan.output_count
+	 * (<=51) outputs. A fixed 2048 buffer overflows once a large group's
+	 * coinbase is built, corrupting adjacent heap. */
+	int bufsize = 16 + plan.output_count * (8 + 1 + 40);
+	buf = ckzalloc(bufsize);
 	for (int i = 0; i < plan.output_count; i++) {
 		uchar txnbin[48] = {0};
 		int txnlen;
@@ -1109,6 +1114,11 @@ static bool build_group_coinbase_outputs(sdata_t *sdata, user_instance_t *user, 
 		txnlen = address_to_txn((char *)txnbin, plan.outputs[i].address, script, segwit);
 		if (txnlen <= 0)
 			continue;
+		if (unlikely(offset + 8 + 1 + txnlen > bufsize)) {
+			LOGERR("SOLO group coinbase buffer full: group=%s offset=%d bufsize=%d outputs=%d",
+				plan.group_name, offset, bufsize, plan.output_count);
+			break;
+		}
 		sats = htole64(plan.outputs[i].payout_sats);
 		memcpy(buf + offset, &sats, 8);
 		offset += 8;
@@ -5855,9 +5865,9 @@ static group_contrib_t *get_create_group_contrib(sdata_t *sdata, const char *gro
 		strncpy(group->group_name, group_name, sizeof(group->group_name) - 1);
 		group->hidden = hidden;
 		HASH_ADD_STR(sdata->group_contribs, group_name, group);
-		LOGWARNING("SOLO group create: group=%s ptr=%p hidden=%s ckp=%p master_sdata=%p", group->group_name, (void *)group, hidden ? "true" : "false", (void *)sdata->ckp, (void *)sdata);
+		LOGWARNING("SOLO group create: group=%s ptr=%p hidden=%s ckp=%p master_sdata=%p hcount=%d head=%p", group->group_name, (void *)group, hidden ? "true" : "false", (void *)sdata->ckp, (void *)sdata, HASH_COUNT(sdata->group_contribs), (void *)sdata->group_contribs);
 	} else {
-		LOGWARNING("SOLO group reuse: group=%s ptr=%p members=%d total_diff=%.0f ckp=%p master_sdata=%p", group->group_name, (void *)group, group->member_count, group->total_diff_window, (void *)sdata->ckp, (void *)sdata);
+		LOGWARNING("SOLO group reuse: group=%s ptr=%p members=%d total_diff=%.0f ckp=%p master_sdata=%p hcount=%d head=%p", group->group_name, (void *)group, group->member_count, group->total_diff_window, (void *)sdata->ckp, (void *)sdata, HASH_COUNT(sdata->group_contribs), (void *)sdata->group_contribs);
 	}
 	mutex_unlock(&sdata->group_lock);
 
