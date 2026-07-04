@@ -5855,9 +5855,9 @@ static group_contrib_t *get_create_group_contrib(sdata_t *sdata, const char *gro
 		strncpy(group->group_name, group_name, sizeof(group->group_name) - 1);
 		group->hidden = hidden;
 		HASH_ADD_STR(sdata->group_contribs, group_name, group);
-		LOGWARNING("SOLO group create: group=%s ptr=%p hidden=%s", group->group_name, (void *)group, hidden ? "true" : "false");
+		LOGWARNING("SOLO group create: group=%s ptr=%p hidden=%s ckp=%p master_sdata=%p", group->group_name, (void *)group, hidden ? "true" : "false", (void *)sdata->ckp, (void *)sdata);
 	} else {
-		LOGWARNING("SOLO group reuse: group=%s ptr=%p members=%d total_diff=%.0f", group->group_name, (void *)group, group->member_count, group->total_diff_window);
+		LOGWARNING("SOLO group reuse: group=%s ptr=%p members=%d total_diff=%.0f ckp=%p master_sdata=%p", group->group_name, (void *)group, group->member_count, group->total_diff_window, (void *)sdata->ckp, (void *)sdata);
 	}
 	mutex_unlock(&sdata->group_lock);
 
@@ -6018,10 +6018,11 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 	mutex_lock(&sdata->group_lock);
 		HASH_FIND_STR(sdata->group_contribs, user->group_name, group);
 		if (!group || !group->member_count || group->total_diff_window <= 0) {
-			LOGERR("SOLO SNAP build plan abort: missing group state group=%s group_ptr=%p members=%d total_diff=%.0f",
+			LOGERR("SOLO SNAP build plan abort: missing group state group=%s group_ptr=%p members=%d total_diff=%.0f ckp=%p master_sdata=%p",
 				user->group_name, (void *)group,
 				group ? group->member_count : 0,
-				group ? group->total_diff_window : 0.0);
+				group ? group->total_diff_window : 0.0,
+				(void *)sdata->ckp, (void *)sdata);
 			mutex_unlock(&sdata->group_lock);
 			return false;
 		}
@@ -9316,6 +9317,7 @@ void *stratifier(void *arg)
 	ckp->sdata = sdata;
 	sdata->ckp = ckp;
 	sdata->verbose = true;
+	LOGWARNING("GRPDBG stratifier ready: ckp=%p master_sdata=%p", (void *)ckp, (void *)sdata);
 
 	/* Wait for the generator to have something for us */
 	while (!ckp->proxy && !ckp->generator_ready)
