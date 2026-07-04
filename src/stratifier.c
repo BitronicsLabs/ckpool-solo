@@ -5866,6 +5866,39 @@ static group_contrib_t *get_create_group_contrib(sdata_t *sdata, const char *gro
 		group->hidden = hidden;
 		HASH_ADD_STR(sdata->group_contribs, group_name, group);
 		LOGWARNING("SOLO group create: group=%s ptr=%p hidden=%s ckp=%p master_sdata=%p hcount=%d head=%p", group->group_name, (void *)group, hidden ? "true" : "false", (void *)sdata->ckp, (void *)sdata, HASH_COUNT(sdata->group_contribs), (void *)sdata->group_contribs);
+		/* MITIGATION (see ASAN diagnostics): the in-memory group_contribs entry
+		 * is being lost/recreated in-process roughly once a minute (root cause
+		 * still under investigation). On (re)creation, repopulate the roster from
+		 * the last persisted payout context so the payout stays stable at its
+		 * real size instead of collapsing to a handful of members each cycle.
+		 * Runs only on the rare create path and reuses the lock-free loader. */
+		{
+			group_payout_plan_t *rp = ckzalloc(sizeof(*rp));
+			if (load_current_group_payout_context(sdata->ckp, group_name, rp)) {
+				int rehydrated = 0;
+				for (int i = 0; i < rp->output_count; i++) {
+					group_member_contrib_t *m;
+
+					if (rp->outputs[i].fee_output || !rp->outputs[i].address[0])
+						continue;
+					if (rp->outputs[i].accepted_diff_window <= 0)
+						continue;
+					m = ckzalloc(sizeof(*m));
+					strncpy(m->address, rp->outputs[i].address, sizeof(m->address) - 1);
+					strncpy(m->worker_label, rp->outputs[i].worker_label, sizeof(m->worker_label) - 1);
+					m->accepted_diff_window = rp->outputs[i].accepted_diff_window;
+					m->accepted_shares_window = rp->outputs[i].accepted_shares_window;
+					HASH_ADD_STR(group->members, address, m);
+					group->member_count++;
+					group->total_diff_window += m->accepted_diff_window;
+					group->total_shares_window += m->accepted_shares_window;
+					rehydrated++;
+				}
+				if (rehydrated)
+					LOGWARNING("SOLO group rehydrated from context: group=%s members=%d", group_name, rehydrated);
+			}
+			free(rp);
+		}
 	} else {
 		LOGWARNING("SOLO group reuse: group=%s ptr=%p members=%d total_diff=%.0f ckp=%p master_sdata=%p hcount=%d head=%p", group->group_name, (void *)group, group->member_count, group->total_diff_window, (void *)sdata->ckp, (void *)sdata, HASH_COUNT(sdata->group_contribs), (void *)sdata->group_contribs);
 	}
