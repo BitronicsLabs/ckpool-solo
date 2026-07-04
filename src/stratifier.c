@@ -5843,6 +5843,11 @@ static group_contrib_t *get_create_group_contrib(sdata_t *sdata, const char *gro
 	if (!group_name || !*group_name)
 		return NULL;
 
+	/* Group contribution state is pool-wide: always operate on the master
+	 * sdata (ckp->sdata), never a per-subproxy/client copy, so accounting,
+	 * payout-plan building and snapshots all share one group_contribs hash. */
+	sdata = sdata->ckp->sdata;
+
 	mutex_lock(&sdata->group_lock);
 	HASH_FIND_STR(sdata->group_contribs, group_name, group);
 	if (!group) {
@@ -5867,6 +5872,7 @@ static void account_group_share(sdata_t *sdata, user_instance_t *user, const dou
 	if (!user || !user->group_name[0] || !user->btcaddress)
 		return;
 
+	sdata = sdata->ckp->sdata;	/* pool-wide group state: use the master sdata */
 	group = get_create_group_contrib(sdata, user->group_name, user->group_hidden);
 	if (!group)
 		return;
@@ -5918,6 +5924,7 @@ static void purge_group_window(sdata_t *sdata, const tv_t *now_t)
 	group_member_contrib_t *member, *tmpmember;
 	time_t cutoff = now_t->tv_sec - 21600;
 
+	sdata = sdata->ckp->sdata;	/* pool-wide group state: use the master sdata */
 	mutex_lock(&sdata->group_lock);
 	HASH_ITER(hh, sdata->group_contribs, group, tmpgroup) {
 		HASH_ITER(hh, group->members, member, tmpmember) {
@@ -6006,6 +6013,7 @@ static bool build_group_payout_plan(sdata_t *sdata, user_instance_t *user, uint6
 		return false;
 	}
 
+	sdata = sdata->ckp->sdata;	/* pool-wide group state: use the master sdata */
 	memset(plan, 0, sizeof(*plan));
 	mutex_lock(&sdata->group_lock);
 		HASH_FIND_STR(sdata->group_contribs, user->group_name, group);
