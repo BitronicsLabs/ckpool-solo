@@ -2218,15 +2218,17 @@ static char *
 process_block(const workbase_t *wb, const char *coinbase, const int cblen,
 	      const uchar *data, const uchar *hash, uchar *flip32, char *blockhash)
 {
-	char *gbt_block, varint[12];
+	char *gbt_block, *hexcoinbase, varint[12];
 	int txns = wb->txns + 1;
-	char hexcoinbase[1024];
 
 	flip_32(flip32, hash);
 	__bin2hex(blockhash, flip32, 32);
 
-	/* Message format: "data" */
-	gbt_block = ckzalloc(1024);
+	/* Size for the block header hex (160) + txn-count varint + the coinbase
+	 * hex (cblen*2). A SOLO group coinbase is far larger than a normal one, so
+	 * the old fixed 1024 buffers overflowed when submitting a group block. */
+	hexcoinbase = ckzalloc(cblen * 2 + 1);
+	gbt_block = ckzalloc(160 + 16 + cblen * 2 + 1);
 	__bin2hex(gbt_block, data, 80);
 	if (txns < 0xfd) {
 		uint8_t val8 = txns;
@@ -2246,6 +2248,7 @@ process_block(const workbase_t *wb, const char *coinbase, const int cblen,
 	strcat(gbt_block, varint);
 	__bin2hex(hexcoinbase, coinbase, cblen);
 	strcat(gbt_block, hexcoinbase);
+	free(hexcoinbase);
 	if (wb->txns)
 		realloc_strcat(&gbt_block, wb->txn_data);
 	return gbt_block;
@@ -6669,23 +6672,26 @@ static double submission_diff(sdata_t *sdata, const stratum_instance_t *client, 
 	uchar *coinb2bin;
 	double ret;
 
-	/* Leave ample enough room for donation generation address (~25) + length counter + user generation
-	 * wb->coinb1len + wb->enonce1constlen + wb->enonce1varlen + wb->enonce2varlen + wb->coinb2len + 25 + cb2len */
-
-	coinbase = alloca(1024);
+	/* Size the coinbase for the actual work: the fixed prefix (coinb1 +
+	 * extranonce1 + extranonce2) plus this user's coinb2. A SOLO group coinb2
+	 * carries up to 51 outputs and is far larger than a normal single-output
+	 * coinbase, so the old fixed 1024 buffer overflowed the stack (WRITE of
+	 * ~1669 bytes) once a group coinbase was built, corrupting the share
+	 * thread's stack. Fetch cb2len under the lock first, then alloca exactly
+	 * what we need. */
+	ck_rlock(&sdata->instance_lock);
+	coinb2bin = __user_coinb2(client, wb, &cb2len);
+	coinbase = alloca(wb->coinb1len + wb->enonce1constlen + wb->enonce1varlen +
+			  wb->enonce2varlen + cb2len + 32);
 	memcpy(coinbase, wb->coinb1bin, wb->coinb1len);
 	cblen = wb->coinb1len;
 	memcpy(coinbase + cblen, &client->enonce1bin, wb->enonce1constlen + wb->enonce1varlen);
 	cblen += wb->enonce1constlen + wb->enonce1varlen;
 	hex2bin(coinbase + cblen, nonce2, wb->enonce2varlen);
 	cblen += wb->enonce2varlen;
-
-	ck_rlock(&sdata->instance_lock);
-	coinb2bin = __user_coinb2(client, wb, &cb2len);
 	memcpy(coinbase + cblen, coinb2bin, cb2len);
-	ck_runlock(&sdata->instance_lock);
-
 	cblen += cb2len;
+	ck_runlock(&sdata->instance_lock);
 
 	gen_hash((uchar *)coinbase, merkle_root, cblen);
 	memcpy(merkle_sha, merkle_root, 32);
