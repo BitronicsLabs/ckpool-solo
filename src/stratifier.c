@@ -125,12 +125,26 @@ typedef struct stratum_instance stratum_instance_t;
 typedef struct group_member_contrib group_member_contrib_t;
 typedef struct group_contrib group_contrib_t;
 
+/* SOLO group contribution is measured over a true rolling GROUP_WINDOW_SECS
+ * window, implemented as a per-member ring of fixed-width time buckets. Each
+ * share adds to the current bucket; buckets older than the window are dropped.
+ * accepted_diff_window / accepted_shares_window are kept as the cached sum of
+ * the currently-live buckets, so build_group_payout_plan() and the coinbase
+ * path keep reading them unchanged -- they now hold the last-GROUP_WINDOW_SECS
+ * contribution instead of a lifetime total. */
+#define GROUP_WINDOW_SECS 21600			/* 6h rolling window */
+#define GROUP_BUCKET_SECS 300			/* 5-min buckets */
+#define GROUP_NUM_BUCKETS (GROUP_WINDOW_SECS / GROUP_BUCKET_SECS)	/* 72 */
+
 struct group_member_contrib {
 	UT_hash_handle hh;
 	char address[128];
 	char worker_label[128];
-	double accepted_diff_window;
-	int64_t accepted_shares_window;
+	double accepted_diff_window;		/* cached sum of live diff_bucket[] (last 6h) */
+	int64_t accepted_shares_window;		/* cached sum of live shares_bucket[] */
+	double diff_bucket[GROUP_NUM_BUCKETS];
+	int64_t shares_bucket[GROUP_NUM_BUCKETS];
+	int64_t bucket_slot[GROUP_NUM_BUCKETS];	/* epoch slot each cell holds; 0 = empty/ancient */
 	tv_t first_share_in_window;
 	tv_t last_share;
 };
@@ -144,6 +158,7 @@ struct group_contrib {
 	int64_t total_shares_window;
 	int member_count;
 	tv_t last_update;
+	int64_t last_purge_slot;		/* last GROUP_BUCKET_SECS slot swept by purge_group_window() */
 };
 
 
@@ -5922,11 +5937,41 @@ static void account_group_share(sdata_t *sdata, user_instance_t *user, const dou
 	} else {
 		LOGWARNING("SOLO group member hit: group=%s address=%s worker=%s member_count=%d", group->group_name, member->address, member->worker_label, group->member_count);
 	}
-	member->accepted_diff_window += diff;
-	member->accepted_shares_window++;
+	{
+		/* Bucketed rolling window: fold this share into the current time bucket,
+		 * then recompute the member's cached window as the sum of the buckets
+		 * within the last GROUP_WINDOW_SECS. Recompute-from-scratch (O(72)) keeps
+		 * the cached sum exact with no incremental drift, and the group total is
+		 * nudged by the delta so build_group_payout_plan's >0 guard stays valid. */
+		int64_t slot = now_t->tv_sec / GROUP_BUCKET_SECS;
+		int64_t oldest = slot - GROUP_NUM_BUCKETS + 1;
+		int idx = (int)((uint64_t)slot % GROUP_NUM_BUCKETS);	/* unsigned mod keeps idx in [0,71] even on a bogus clock */
+		double dsum = 0.0;
+		int64_t ssum = 0;
+
+		if (member->bucket_slot[idx] != slot) {
+			/* Cell is from an earlier revolution (>= window old) or empty: reset. */
+			member->diff_bucket[idx] = 0;
+			member->shares_bucket[idx] = 0;
+			member->bucket_slot[idx] = slot;
+		}
+		member->diff_bucket[idx] += diff;
+		member->shares_bucket[idx]++;
+
+		for (int b = 0; b < GROUP_NUM_BUCKETS; b++) {
+			/* Live = within [oldest, slot]; the <= slot bound ignores a
+			 * future-stamped cell left by a backward wall-clock step. */
+			if (member->bucket_slot[b] >= oldest && member->bucket_slot[b] <= slot) {
+				dsum += member->diff_bucket[b];
+				ssum += member->shares_bucket[b];
+			}
+		}
+		group->total_diff_window += dsum - member->accepted_diff_window;
+		group->total_shares_window += ssum - member->accepted_shares_window;
+		member->accepted_diff_window = dsum;
+		member->accepted_shares_window = ssum;
+	}
 	copy_tv(&member->last_share, now_t);
-	group->total_diff_window += diff;
-	group->total_shares_window++;
 	copy_tv(&group->last_update, now_t);
 	mutex_unlock(&sdata->group_lock);
 }
@@ -5935,12 +5980,43 @@ static void purge_group_window(sdata_t *sdata, const tv_t *now_t)
 {
 	group_contrib_t *group, *tmpgroup;
 	group_member_contrib_t *member, *tmpmember;
-	time_t cutoff = now_t->tv_sec - 21600;
+	int64_t cur_slot = now_t->tv_sec / GROUP_BUCKET_SECS;
+	int64_t oldest = cur_slot - GROUP_NUM_BUCKETS + 1;
+	time_t cutoff = now_t->tv_sec - GROUP_WINDOW_SECS;
 
 	sdata = sdata->ckp->sdata;	/* pool-wide group state: use the master sdata */
 	mutex_lock(&sdata->group_lock);
 	HASH_ITER(hh, sdata->group_contribs, group, tmpgroup) {
+		/* Bucket staleness only changes at a GROUP_BUCKET_SECS boundary, so sweep
+		 * a group at most once per slot instead of on every share (this is called
+		 * per share). Between sweeps a member's cached window can lag by at most
+		 * one bucket, which the money path reads as a <5min boundary fuzz. */
+		if (group->last_purge_slot == cur_slot)
+			continue;
+		group->last_purge_slot = cur_slot;
 		HASH_ITER(hh, group->members, member, tmpmember) {
+			double dsum = 0.0;
+			int64_t ssum = 0;
+
+			for (int b = 0; b < GROUP_NUM_BUCKETS; b++) {
+				if (member->bucket_slot[b] < oldest) {
+					member->diff_bucket[b] = 0;
+					member->shares_bucket[b] = 0;
+					member->bucket_slot[b] = 0;
+				} else if (member->bucket_slot[b] <= cur_slot) {
+					dsum += member->diff_bucket[b];
+					ssum += member->shares_bucket[b];
+				}
+				/* future-stamped cells (> cur_slot, from a backward clock
+				 * step) are left intact but not counted until now catches up */
+			}
+			group->total_diff_window += dsum - member->accepted_diff_window;
+			group->total_shares_window += ssum - member->accepted_shares_window;
+			member->accepted_diff_window = dsum;
+			member->accepted_shares_window = ssum;
+
+			/* A member idle for the whole window has drained to 0: evict it so the
+			 * roster stays the live contributor set (matches the DB census). */
 			if (member->last_share.tv_sec && member->last_share.tv_sec < cutoff) {
 				LOGWARNING("SOLO group purge member: group=%s address=%s worker=%s last_share=%ld cutoff=%ld", group->group_name, member->address, member->worker_label, (long)member->last_share.tv_sec, (long)cutoff);
 				group->total_diff_window -= member->accepted_diff_window;
