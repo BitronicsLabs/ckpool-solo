@@ -5885,7 +5885,7 @@ static group_contrib_t *get_create_group_contrib(sdata_t *sdata, const char *gro
 		HASH_ADD_STR(sdata->group_contribs, group_name, group);
 		LOGWARNING("SOLO group create: group=%s ptr=%p hidden=%s", group->group_name, (void *)group, hidden ? "true" : "false");
 	} else {
-		LOGWARNING("SOLO group reuse: group=%s ptr=%p members=%d total_diff=%.0f", group->group_name, (void *)group, group->member_count, group->total_diff_window);
+		LOGDEBUG("SOLO group reuse: group=%s ptr=%p members=%d total_diff=%.0f", group->group_name, (void *)group, group->member_count, group->total_diff_window);
 	}
 	mutex_unlock(&sdata->group_lock);
 
@@ -5935,7 +5935,7 @@ static void account_group_share(sdata_t *sdata, user_instance_t *user, const dou
 		group->member_count++;
 		LOGWARNING("SOLO group member add: group=%s address=%s worker=%s member_count=%d", group->group_name, member->address, member->worker_label, group->member_count);
 	} else {
-		LOGWARNING("SOLO group member hit: group=%s address=%s worker=%s member_count=%d", group->group_name, member->address, member->worker_label, group->member_count);
+		LOGDEBUG("SOLO group member hit: group=%s address=%s worker=%s member_count=%d", group->group_name, member->address, member->worker_label, group->member_count);
 	}
 	{
 		/* Bucketed rolling window: fold this share into the current time bucket,
